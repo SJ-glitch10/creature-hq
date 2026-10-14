@@ -15,10 +15,10 @@ import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp, Timestamp, connectFirestoreEmulator,
   collection, getDocs, query, orderBy, limit
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
-import { firebaseConfig } from "./firebase-config.js?v=17";
+import { firebaseConfig } from "./firebase-config.js?v=18";
 
 // workshop.js before game.js: the game draws its first screen as soon as it loads
-const GAME_SCRIPTS = ["/assets/quiz.js?v=17", "/assets/workshop.js?v=17", "/assets/game.js?v=17"];
+const GAME_SCRIPTS = ["/assets/quiz.js?v=18", "/assets/workshop.js?v=18", "/assets/game.js?v=18"];
 const MAX_SAVE_CHARS = 900000;          // Firestore documents top out at 1 MiB
 const WRITE_DELAY = 1500;
 

@@ -28,7 +28,7 @@ async function test(name, fn){
 }
 console.log("firestore.rules: projects");
 await test("project without kind (older app) is allowed", async () => assert.equal(await write("u1", "users/u1/projects/a", project()), 200));
-for(const k of ["web", "react", "sql"])
+for(const k of ["web", "react", "sql", "node"])
   await test(`kind "${k}" is allowed`, async () => assert.equal(await write("u1", "users/u1/projects/k" + k, project({ kind:str(k) })), 200));
 await test("unknown kind is rejected", async () => assert.equal(await write("u1", "users/u1/projects/b", project({ kind:str("php") })), 403));
 await test("non-string kind is rejected", async () => assert.equal(await write("u1", "users/u1/projects/c", project({ kind:{ integerValue:"1" } })), 403));

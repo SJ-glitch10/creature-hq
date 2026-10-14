@@ -10,19 +10,22 @@ const RUN_ORIGIN = location.hostname==="localhost" ? "http://127.0.0.1:5174" : l
 // a project's kind decides how the runner treats its three files and what the tabs are called
 const WS_KINDS = {
   web:  { files:[["html","index.html"],["css","style.css"],["js","script.js"]] },
-  react:{ files:[["html","index.html"],["css","style.css"],["js","App.jsx"]], lang:"jsx" },
+  react:{ files:[["html","index.html"],["css","style.css"],["js","App.jsx"]], langs:{js:"jsx"} },
   // one SQL file, kept in the js slot; a fresh PostgreSQL database runs it on every run
-  sql:  { files:[["js","query.sql"]], lang:"sql" }
+  sql:  { files:[["js","query.sql"]], langs:{js:"sql"} },
+  // Node: server.js, a module and .env in the three existing slots, so saved projects keep the same shape
+  node: { files:[["js","server.js"],["css","module.js"],["html",".env"]], langs:{css:"js",html:"text"} }
 };
-// phase 8's first four practice quests are plain SQL; connecting Node to PostgreSQL needs a server
-const wsKindOfQuest = (pi,si,qi) => pi===5 ? "react" : pi===8&&si===1&&qi<4 ? "sql" : "web";
+// phase 6/7 practice quests (not the opening "sketch it" ones) and the Express project run on the runner's Node stand-in;
+// phase 8's first four practice quests are plain SQL; connecting Node to PostgreSQL needs a real database server
+const wsKindOfQuest = (pi,si,qi) => pi===5 ? "react" : (pi===6||pi===7)&&si===1&&qi>0 || pi===7&&si===2 ? "node" : pi===8&&si===1&&qi<4 ? "sql" : "web";
 const wsKind = p => { if(p&&WS_KINDS[p.kind]) return p.kind; const q=p&&p.questId?questOf(p.questId):null; return q?wsKindOfQuest(q.pi,q.si,q.qi):"web"; };
 const wsFiles = p => WS_KINDS[wsKind(p)].files;
 const wsJsName = p => wsFiles(p).find(([k])=>k==="js")[1];
 const WS_MAX = 100000;                 // characters per file (matches firestore.rules)
 const WS_SAVE_IDLE = 2000, WS_SAVE_MAX = 10000, WS_RUN_DELAY = 700, WS_STUCK_MS = 3500;
-// quests you can build in the browser: HTML, CSS, JavaScript, API and React practice and project stages, and the SQL practice quests
-const wsQuestOk = (pi,si,qi) => (pi>=1 && pi<=5 && ["Tiny Wins","Project","Projects"].includes(phases[pi].stages[si][0])) || wsKindOfQuest(pi,si,qi)==="sql";
+// quests you can build in the browser: HTML, CSS, JavaScript, API and React practice and project stages, Node/Express and the SQL practice quests
+const wsQuestOk = (pi,si,qi) => (pi>=1 && pi<=5 && ["Tiny Wins","Project","Projects"].includes(phases[pi].stages[si][0])) || ["node","sql"].includes(wsKindOfQuest(pi,si,qi));
 
 const ws = { list:null, loading:false, error:"", cur:null, editor:null, editorLoading:null,
   dirty:false, saving:false, saveIdle:null, saveMax:null, lastSaveErr:false,
@@ -50,6 +53,7 @@ function wsQuestTemplate(t){
   const kind=wsKindOfQuest(t.pi,t.si,t.qi);
   if(kind==="sql") return { name:t.q.slice(0,60), questId:t.id, kind, files:{ html:"", css:"",
     js:'-- Quest: '+t.q+'\n-- A real PostgreSQL database runs in your browser. It starts empty on every run,\n-- then runs this file top to bottom. Each statement\'s result shows in the preview.\n\nCREATE TABLE creatures (\n  id SERIAL PRIMARY KEY,\n  name TEXT NOT NULL,\n  level INTEGER DEFAULT 1\n);\n\nINSERT INTO creatures (name, level) VALUES (\'Gobbit\', 3), (\'Blip\', 7);\n\nSELECT * FROM creatures ORDER BY level DESC;\n' } };
+  if(kind==="node") return { name:t.q.slice(0,60), questId:t.id, kind, files:wsNodeFiles(t) };
   if(kind==="react") return { name:t.q.slice(0,60), questId:t.id, kind, files:{
     html:wsPage(esc(t.q),'  <!-- Quest: '+t.q.replace(/--/g,"-")+' -->\n  <!-- React renders into #root. Write your components in App.jsx. -->\n  <div id="root"></div>',"","App.jsx"),
     css:"/* Styles for this page */\n",
@@ -57,6 +61,18 @@ function wsQuestTemplate(t){
   return { name:t.q.slice(0,60), questId:t.id, kind, files:{
     html:wsPage(esc(t.q),'  <!-- Quest: '+t.q.replace(/--/g,"-")+' -->\n  <!-- '+phases[t.pi].short+' · '+t.stage+'. Build it here; the preview updates as you type. -->\n  '),
     css:"/* Styles for this page */\n", js:"// JavaScript for this page\n" } };
+}
+
+// Node quests: raw http in phase 6, Express from phase 7 on
+function wsNodeFiles(t){
+  const head='// Quest: '+t.q+'\n// Runs like `node server.js`; values from .env are in process.env.\n// Once a server is listening, send it requests from the preview.\n';
+  const env='# One KEY=value per line. Read them with process.env.KEY\nPORT=3000\n';
+  if(t.pi===6) return { html:env,
+    css:'// A module: export what other files may use, then require("./module.js") it.\nfunction greet(name) {\n  return `Hello, ${name}!`;\n}\n\nmodule.exports = { greet };\n',
+    js:head+'const http = require("http");\nconst { greet } = require("./module.js");\n\nconst PORT = process.env.PORT || 3000;\n\nconst server = http.createServer((req, res) => {\n  console.log(req.method, req.url);\n  if (req.url === "/") {\n    res.writeHead(200, { "Content-Type": "text/plain" });\n    res.end(greet("creature"));\n  } else {\n    res.writeHead(404, { "Content-Type": "text/plain" });\n    res.end("Not found");\n  }\n});\n\nserver.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));\n' };
+  return { html:env,
+    css:'// Data for the API. Every run starts from this list again.\nconst tasks = [\n  { id: 1, title: "Feed the creature", done: false },\n  { id: 2, title: "Ship a project", done: false }\n];\n\nmodule.exports = { tasks };\n',
+    js:head+'const express = require("express");\nconst { tasks } = require("./module.js");\n\nconst app = express();\napp.use(express.json());\n\napp.get("/tasks", (req, res) => {\n  res.json(tasks);\n});\n\nconst PORT = process.env.PORT || 3000;\napp.listen(PORT, () => console.log(`API running at http://localhost:${PORT}`));\n' };
 }
 
 /* ---------- loading ---------- */
@@ -69,7 +85,7 @@ async function wsLoadList(force){
   ws.loading=false;
 }
 function wsEditorModule(){
-  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=17").catch(e=>{ ws.editorLoading=null; throw e; }));
+  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=18").catch(e=>{ ws.editorLoading=null; throw e; }));
 }
 
 /* ---------- view ---------- */
@@ -155,7 +171,7 @@ function wsMountEditor(el){
   wsEditorModule().then(mod=>{
     if(!ws.cur||!$("wsEditor")) return;
     $("wsEditor").innerHTML="";
-    ws.editor=mod.createEditor({ parent:$("wsEditor"), files:ws.cur.files, active:ws.cur.file||"html", jsLang:WS_KINDS[wsKind(ws.cur)].lang||"js",
+    ws.editor=mod.createEditor({ parent:$("wsEditor"), files:ws.cur.files, active:ws.cur.file||"html", langs:WS_KINDS[wsKind(ws.cur)].langs||{}, labels:Object.fromEntries(wsFiles(ws.cur)),
       onChange:(name,val)=>{ ws.cur.files[name]=val; wsChanged(true); },
       onRun:()=>wsRun(true), onSave:()=>wsSaveNow() });
     wsRenderBar();
@@ -269,13 +285,13 @@ function wsRun(manual){
   // the runner is another origin, so allow-same-origin gives it that origin (working localStorage/fetch), never ours
   f.setAttribute("sandbox","allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox");
   f.setAttribute("allow","clipboard-write");
-  f.src=RUN_ORIGIN+"/?v=17";
+  f.src=RUN_ORIGIN+"/?v=18";
   $("wsFrameWrap").appendChild(f); ws.frame=f;
   ws.stuckTimer=setTimeout(wsStuck,WS_STUCK_MS+2000);   // generous first timer covers loading the runner page
 }
 function wsSend(win){
   const c=ws.cur; if(!c||!win) return;
-  win.postMessage({type:"hq-run",runId:ws.runId,kind:c.kind,html:c.files.html,css:c.files.css,js:c.files.js},RUN_ORIGIN);
+  win.postMessage({type:"hq-run",runId:ws.runId,id:c.id,kind:c.kind,html:c.files.html,css:c.files.css,js:c.files.js},RUN_ORIGIN);
 }
 function wsStuck(){
   if(!ws.cur||ws.runState!=="loading") return;
@@ -295,7 +311,7 @@ addEventListener("message",e=>{
   if(m.type==="hq-wait"){   // the runner is downloading libraries (e.g. the React compiler); give it longer before calling it stuck
     clearTimeout(ws.stuckTimer); ws.stuckTimer=setTimeout(wsStuck,Math.min(60000,+m.ms||WS_STUCK_MS));
   }else if(m.type==="hq-console"){
-    if(ws.logs.length<500) ws.logs.push({level:m.level,text:String(m.text||""),line:+m.line||0});
+    if(ws.logs.length<500) ws.logs.push({level:m.level,text:String(m.text||""),line:+m.line||0,file:WS_KINDS[ws.cur.kind].files.some(([k])=>k===m.file)?m.file:"js"});
     else if(ws.logs.length===500) ws.logs.push({level:"warn",text:"Too many messages. Only the first 500 are shown.",line:0});
     wsRenderLogs(); wsLed();
   }else if(m.type==="hq-loaded"){
@@ -313,7 +329,7 @@ function wsRenderLogs(){
   const errs=ws.logs.filter(x=>x.level==="error").length, warns=ws.logs.filter(x=>x.level==="warn").length;
   $("wsCounts").innerHTML=(errs?'<span class="c-err">'+errs+'</span>':'')+(warns?'<span class="c-warn">'+warns+'</span>':'');
   ol.innerHTML=ws.logs.length?ws.logs.map(x=>'<li class="lv-'+x.level+'">'+(x.level==="error"?ic("warn"):x.level==="warn"?ic("warn"):'<span class="ws-caret" aria-hidden="true">›</span>')+
-      '<span class="ws-log-text">'+esc(x.text)+'</span>'+(x.line?'<button type="button" class="ws-line" data-act="ws-goto" data-line="'+x.line+'" title="Show this line">'+esc(wsJsName(ws.cur))+':'+x.line+'</button>':'')+'</li>').join("")
+      '<span class="ws-log-text">'+esc(x.text)+'</span>'+(x.line?'<button type="button" class="ws-line" data-act="ws-goto" data-file="'+x.file+'" data-line="'+x.line+'" title="Show this line">'+esc(wsFiles(ws.cur).find(([k])=>k===x.file)[1])+':'+x.line+'</button>':'')+'</li>').join("")
     :'<li class="ws-log-empty">'+(ws.runState==="loading"?"Running":ws.runState==="stuck"?"Stopped. The page never finished loading.":ws.cur.kind==="sql"?"No errors. Results show in the preview.":"Nothing logged. Use console.log() in "+esc(wsJsName(ws.cur))+" to print here.")+'</li>';
   ol.scrollTop=ol.scrollHeight;
 }
@@ -373,7 +389,7 @@ function wsAction(a, el){
     case "ws-device": ws.device=el.dataset.device; try{ localStorage.setItem("hqWsDevice",ws.device); }catch(e){}
       $("wsStage").dataset.device=ws.device; document.querySelectorAll('[data-act="ws-device"]').forEach(b=>b.setAttribute("aria-pressed",String(b===el))); break;
     case "ws-pane": ws.mobilePane=el.dataset.pane; wsRenderBar(); break;
-    case "ws-goto": if(ws.editor){ ws.mobilePane="code"; ws.editor.goto("js",+el.dataset.line); ws.cur.file="js"; wsRenderBar(); } break;
+    case "ws-goto": if(ws.editor){ ws.mobilePane="code"; ws.editor.goto(el.dataset.file||"js",+el.dataset.line); ws.cur.file=el.dataset.file||"js"; wsRenderBar(); } break;
     case "ws-reload-editor": ws.editorLoading=null; $("view-workshop").innerHTML=""; renderWorkshop(); break;
     default: return false;
   }

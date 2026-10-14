@@ -212,6 +212,126 @@ await test("sql: more than 200 rows shows the first 200", async () => {
   const r = await runSql("SELECT g FROM generate_series(1, 250) g;");
   assert.match(r.text, /250 rows, first 200 shown/);
 });
+// Node: server.js (js slot), module.js (css slot) and .env (html slot); the preview holds a request panel
+const runNode = async ({ server = "", mod = "", env = "", id = "t" + Math.random() }) => {
+  await page.evaluate(([js, css, html, id]) => new Promise(res => {
+    document.querySelectorAll("iframe").forEach(f => f.remove());
+    const f = document.createElement("iframe"); f.src = "http://localhost:5174/"; document.body.appendChild(f);
+    const runId = Math.random(), t = setTimeout(() => { window.__nlog.push(["TIMEOUT"]); res(); }, 20000);
+    window.__nlog = [];
+    removeEventListener("message", window.__nh || (() => {}));
+    addEventListener("message", window.__nh = e => { if(e.source !== f.contentWindow) return; const m = e.data;
+      if(m.type === "hq-ready") return f.contentWindow.postMessage({ type:"hq-run", runId, id, kind:"node", html, css, js }, "http://localhost:5174");
+      window.__nlog.push(m.type === "hq-console" ? [m.level, m.text, m.line, m.file] : [m.type]);
+      if(m.type === "hq-loaded"){ clearTimeout(t); res(); }
+    });
+  }), [server, mod, env, id]);
+  await page.waitForTimeout(150);   // listen callbacks and the first request
+  const frame = page.frames().find(f => f.url().startsWith("http://localhost:5174") && f.parentFrame());
+  const logs = () => page.evaluate(() => window.__nlog);
+  return { frame, id, logs, errors: async () => errorsOf(await logs()),
+    status: () => frame.evaluate(() => document.getElementById("st").textContent),
+    last: () => frame.evaluate(() => { const s = document.querySelector("#out section"); return s ? s.innerText : ""; }),
+    send: async (method, url, body = "") => {
+      const n = await frame.evaluate(() => document.querySelectorAll("#out section").length);
+      await frame.evaluate(([m, u, b]) => { const el = document.getElementById("m"); el.value = m; el.dispatchEvent(new Event("change"));
+        document.getElementById("u").value = u; document.getElementById("b").value = b; document.getElementById("rq").requestSubmit(); }, [method, url, body]);
+      await frame.waitForFunction(n => document.querySelectorAll("#out section").length > n || n === 20, n, { timeout: 8000 });
+      return frame.evaluate(() => document.querySelector("#out section").innerText);
+    } };
+};
+const HTTP = 'const http = require("http");\nconst { greet } = require("./module.js");\nconst server = http.createServer((req, res) => {\n  console.log(req.method, req.url);\n' +
+  '  if (req.url === "/") { res.writeHead(200, { "Content-Type": "text/plain" }); res.end(greet("creature")); }\n  else { res.writeHead(404, { "Content-Type": "text/plain" }); res.end("Not found"); }\n});\n' +
+  'server.listen(process.env.PORT || 3000, () => console.log("listening", process.env.PORT));\n';
+const GREET = 'module.exports = { greet: name => `Hello, ${name}!` };\n';
+await test("node: raw http server answers the first request; .env is in process.env", async () => {
+  const r = await runNode({ server: HTTP, mod: GREET, env: "# port\nPORT=4000\nNAME=\"Gob bit\" # comment\n" });
+  assert.deepEqual(await r.errors(), []);
+  assert.match(await r.status(), /Listening on port 4000/);
+  assert.match(await r.last(), /GET \/\s+200 OK · text\/plain[\s\S]*Hello, creature!/);
+  assert.deepEqual((await r.logs()).filter(l => l[0] === "log").map(l => l[1]), ["listening 4000", "GET /"]);
+  assert.match(await r.send("GET", "/nope"), /404 Not Found[\s\S]*Not found/);
+});
+await test("node: a script without a server just runs; require('./module') works without .js", async () => {
+  const r = await runNode({ server: 'const { greet } = require("./module");\nconsole.log(greet("you"));\n', mod: GREET });
+  assert.deepEqual((await r.logs()).filter(l => l[0] === "log").map(l => l[1]), ["Hello, you!"]);
+  assert.match(await r.status(), /Script finished/);
+});
+await test("node: errors name the right file and line", async () => {
+  let r = await runNode({ server: '\nrequire("mongoose");\n' });
+  assert.deepEqual((await r.errors()).map(e => [e[1].split(".")[0], e[2], e[3]]), [["Error: Cannot find module 'mongoose'", 2, "js"]]);
+  assert.match(await r.status(), /Crashed while starting/);
+  r = await runNode({ server: 'require("./module.js");\n', mod: '// line 1\n\nundefinedThing();\n' });
+  assert.deepEqual((await r.errors()).map(e => [e[1], e[2], e[3]]), [["ReferenceError: undefinedThing is not defined", 3, "css"]]);
+  r = await runNode({ server: 'const a = 1;\nconst b = ;\n' });
+  assert.deepEqual((await r.errors()).map(e => [e[2], e[3]]), [[2, "js"]]);
+  assert.match(await r.status(), /Didn't start/);
+});
+await test("node: process.exit stops the script", async () => {
+  const r = await runNode({ server: 'if (!process.env.API_KEY) {\n  console.error("Missing API_KEY");\n  process.exit(1);\n}\nconsole.log("not reached");\n' });
+  assert.deepEqual((await r.logs()).filter(l => l[0] === "error" || l[0] === "log").map(l => l[1]), ["Missing API_KEY"]);
+  assert.match(await r.status(), /exited with code 1/);
+});
+await test("node: res.end(object), no answer and a crash in a handler are explained", async () => {
+  let r = await runNode({ server: 'require("http").createServer((req, res) => {\n  res.end({ ok: true });\n}).listen(3000);\n' });
+  assert.match(await r.last(), /server crashed/);
+  assert.deepEqual((await r.errors()).map(e => [e[1].split(".")[0], e[2]]), [['TypeError: The "chunk" argument must be of type string or an instance of Buffer or Uint8Array', 2]]);
+  r = await runNode({ server: 'require("http").createServer((req, res) => {\n  console.log("got it");\n}).listen(3000);\n' });
+  await r.frame.waitForFunction(() => /No response after 5 seconds/.test(document.body.innerText), null, { timeout: 8000 });
+});
+const API = 'const express = require("express");\nconst app = express();\nconst tasks = [{ id: 1, title: "Feed" }];\napp.use(express.json());\n' +
+  'app.use((req, res, next) => { console.log(req.method, req.path); next(); });\n' +
+  'app.get("/tasks", (req, res) => res.json(tasks));\n' +
+  'app.post("/tasks", (req, res) => {\n  if (!req.body || !req.body.title) return res.status(400).json({ error: "title is required" });\n  const t = { id: tasks.length + 1, title: req.body.title };\n  tasks.push(t);\n  res.status(201).json(t);\n});\n' +
+  'app.put("/tasks/:id", (req, res) => {\n  const t = tasks.find(x => x.id === Number(req.params.id));\n  if (!t) return res.sendStatus(404);\n  Object.assign(t, req.body);\n  res.json(t);\n});\n' +
+  'app.delete("/tasks/:id", (req, res) => res.status(204).end());\n' +
+  'app.get("/boom", (req, res) => {\n  throw new Error("kaboom");\n});\n' +
+  'app.get("/async", async (req, res) => {\n  await null;\n  throw new Error("later");\n});\n' +
+  'const api = express.Router();\napi.get("/hello/:name", (req, res) => res.send(`hi ${req.params.name} ${req.query.x}`));\napp.use("/api", api);\n' +
+  'app.use((err, req, res, next) => {\n  res.status(err.status || 500).json({ error: err.message });\n});\n' +
+  'app.listen(3000);\n';
+await test("express: CRUD on /tasks with JSON bodies, params and status codes", async () => {
+  const r = await runNode({ server: API });
+  assert.match(await r.last(), /GET \/tasks\s+200 OK · application\/json[\s\S]*"title": "Feed"/);   // first GET route is requested on start
+  assert.match(await r.send("POST", "/tasks", '{"title":"Ship"}'), /201 Created[\s\S]*"id": 2,\s+"title": "Ship"/);
+  assert.match(await r.send("POST", "/tasks", '{}'), /400 Bad Request[\s\S]*title is required/);
+  assert.match(await r.send("PUT", "/tasks/2", '{"title":"Shipped"}'), /200 OK[\s\S]*"title": "Shipped"/);
+  assert.match(await r.send("PUT", "/tasks/9", '{"title":"x"}'), /404 Not Found[\s\S]*Not Found/);
+  assert.match(await r.send("DELETE", "/tasks/2"), /204 No Content[\s\S]*Empty body/);
+  assert.match(await r.send("GET", "/missing"), /404 Not Found[\s\S]*Cannot GET \/missing/);
+  assert.match(await r.send("GET", "/api/hello/Gob%20bit?x=1"), /200 OK · text\/html[\s\S]*hi Gob bit 1/);
+  assert.deepEqual(await r.errors(), []);
+  assert.ok((await r.logs()).some(l => l[0] === "log" && l[1] === "POST /tasks"));
+});
+await test("express: thrown and async errors reach the error middleware; bad JSON is a 400", async () => {
+  const r = await runNode({ server: API });
+  assert.match(await r.send("GET", "/boom"), /500 Internal Server Error[\s\S]*kaboom/);
+  assert.match(await r.send("GET", "/async"), /500 Internal Server Error[\s\S]*later/);
+  assert.match(await r.send("POST", "/tasks", '{"title":'), /400 Bad Request/);
+  assert.deepEqual(await r.errors(), []);   // the student's error middleware handled them
+});
+await test("express: unhandled errors log with a line; answering twice is ERR_HTTP_HEADERS_SENT", async () => {
+  const r = await runNode({ server: 'const app = require("express")();\napp.get("/", (req, res) => {\n  res.send("one");\n  res.send("two");\n});\napp.get("/x", (req, res) => {\n  null.y;\n});\napp.listen(3000);\n' });
+  assert.match(await r.last(), /200 OK[\s\S]*one/);
+  assert.match(await r.send("GET", "/x"), /500 Internal Server Error[\s\S]*Internal Server Error/);
+  assert.deepEqual((await r.errors()).map(e => [e[1], e[2]]), [["Error: Cannot set headers after they are sent to the client", 4], ["TypeError: Cannot read properties of null (reading 'y')", 7]]);
+});
+await test("express: without express.json() req.body is undefined", async () => {
+  const r = await runNode({ server: 'const app = require("express")();\napp.post("/", (req, res) => res.json({ body: String(req.body) }));\napp.listen(3000);\n' });
+  assert.match(await r.send("POST", "/", '{"a":1}'), /"body": "undefined"/);
+});
+await test("node: the last request is replayed on the next run of the same project", async () => {
+  let r = await runNode({ server: API, id: "replay" });
+  await r.send("POST", "/tasks", '{"title":"Again"}');
+  r = await runNode({ server: API, id: "replay" });
+  assert.match(await r.last(), /POST \/tasks\s+201 Created[\s\S]*"title": "Again"/);
+});
+await test("node: HTML responses render in a sandboxed frame", async () => {
+  const r = await runNode({ server: 'require("express")().get("/", (req, res) => res.send("<h1>hi</h1><script>parent.hacked=1</script>")).listen(3000);\n' });
+  assert.equal(await r.frame.evaluate(() => document.querySelector("#out iframe").getAttribute("sandbox")), "");
+  assert.equal(await r.frame.evaluate(() => window.hacked), undefined);
+});
+await page.evaluate(() => document.querySelectorAll("iframe").forEach(f => f.remove()));
 await test("runner ignores messages from origins that aren't the app", async () => {
   const p2 = await browser.newPage();
   await p2.goto("http://localhost:5174/");   // same-origin parent that isn't allowed: opened directly, no host
@@ -233,10 +353,15 @@ await app.evaluate(() => { document.getElementById("titleRoot").innerHTML = ""; 
 const W = (fn, arg) => app.evaluate(fn, arg);
 const waitRun = () => app.waitForFunction(() => ws.runState === "ok" || ws.runState === "stuck", null, { timeout: 40000 });
 
-await test("wsQuestOk: phases 1-5 practice/project stages and the SQL practice quests only", async () => {
+await test("wsQuestOk: phases 1-5 practice/project stages, Node/Express practice and project, SQL practice quests", async () => {
   assert.deepEqual(await W(() => [wsQuestOk(1,1,0), wsQuestOk(4,2,1), wsQuestOk(5,1,0), wsQuestOk(5,2,0), wsQuestOk(5,0,0), wsQuestOk(0,1,0), wsQuestOk(6,1,0),
     wsQuestOk(8,1,0), wsQuestOk(8,1,3), wsQuestOk(8,1,4), wsQuestOk(8,0,0), wsQuestOk(8,2,0)]),
     [true, true, true, true, false, false, false, true, true, false, false, false]);
+  // Node/Express: practice quests after the opening "sketch it" one, and the Express project; not the Learn stages
+  assert.deepEqual(await W(() => [wsQuestOk(6,1,1), wsQuestOk(6,1,5), wsQuestOk(6,0,0), wsQuestOk(6,2,0), wsQuestOk(7,1,0), wsQuestOk(7,1,1), wsQuestOk(7,1,6), wsQuestOk(7,2,0), wsQuestOk(7,0,0)]),
+    [true, true, false, false, false, true, true, true, false]);
+  assert.deepEqual(await W(() => [phases[6].stages[1][1][0], phases[7].stages[1][1][0], phases[7].stages[2][1][0]]),
+    ["Sketch how a request travels: browser → server → response", "Sketch the routes your API will need before writing any code", "Build Task Management REST API"]);
   assert.deepEqual(await W(() => phases[8].stages[1][1].slice(0, 5)), ["Create a users table","Insert and query rows","Create two related tables","Write a JOIN query","Connect Node to PostgreSQL"]);
 });
 await test("wsKind: stored kind wins, else from the quest, else web", async () => {
@@ -329,6 +454,34 @@ await test("SQL quest: one query.sql tab, template runs, error line links to que
   assert.equal(await W(() => document.querySelector(".ws-line").textContent), "query.sql:2");
   const p = await W(() => Object.values(JSON.parse(localStorage.getItem("hqProjects"))).find(x => x.questId === "8-1-0"));
   assert.equal(p.kind, "sql");
+  await W(() => wsBack());
+});
+await test("Node quest: server.js, module.js and .env tabs, template answers GET /, module errors link to module.js, kind saved", async () => {
+  await W(() => wsQuest("6-1-1"));
+  await app.waitForFunction(() => ws.cur && ws.cur.questId === "6-1-1" && ws.runState === "ok" && ws.frame, null, { timeout: 20000 });
+  assert.deepEqual(await W(() => [...document.querySelectorAll(".ws-file")].map(b => b.textContent)), ["server.js", "module.js", ".env"]);
+  assert.equal(await W(() => ws.editor.active), "js");
+  const frame = app.frames().find(f => f.url().startsWith("http://localhost:5174"));
+  await frame.waitForFunction(() => /Hello, creature!/.test(document.body.innerText));
+  assert.match(await frame.evaluate(() => document.getElementById("st").textContent), /Listening on port 3000/);
+  await app.waitForFunction(() => ws.logs.some(l => l.text === "GET /"));
+  assert.deepEqual(await W(() => ws.logs.filter(l => l.level === "error")), []);
+  await W(() => { ws.cur.files.css = "// fine\nnope();\n"; wsRun(true); });
+  await waitRun();
+  await app.waitForFunction(() => ws.logs.some(l => l.level === "error"));
+  assert.equal(await W(() => document.querySelector(".ws-line").textContent), "module.js:2");
+  await W(() => document.querySelector(".ws-line").click());
+  assert.equal(await W(() => ws.editor.active), "css");
+  const p = await W(() => Object.values(JSON.parse(localStorage.getItem("hqProjects"))).find(x => x.questId === "6-1-1"));
+  assert.equal(p.kind, "node");
+  await W(() => wsBack());
+});
+await test("Express project: template serves GET /tasks from module.js", async () => {
+  await W(() => wsQuest("7-2-0"));
+  await app.waitForFunction(() => ws.cur && ws.cur.questId === "7-2-0" && ws.runState === "ok" && ws.frame, null, { timeout: 20000 });
+  const frame = app.frames().find(f => f.url().startsWith("http://localhost:5174"));
+  await frame.waitForFunction(() => /GET \/tasks[\s\S]*200 OK[\s\S]*Feed the creature/.test(document.body.innerText));
+  assert.deepEqual(await W(() => ws.logs.filter(l => l.level === "error")), []);
   await W(() => wsBack());
 });
 await test("SQL: a query that never finishes is reported as stuck", async () => {

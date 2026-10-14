@@ -34,6 +34,33 @@ Student code never runs on creature-hq.web.app. The preview is an iframe of **cr
 - it runs in its own browser process, so an endless loop can't freeze the app (the Workshop notices after a few seconds and pauses auto-run);
 - `localStorage` and `fetch` work like on a real web page, which the roadmap's JavaScript and API quests need.
 
+### Project kinds
+
+Every project stores the same three slots (`html`, `css`, `js`), so `firestore.rules` and saved data have one shape. A project's `kind` decides what the slots are called, which editor language each tab uses, and how the runner treats them (`WS_KINDS` in `workshop.js`, `KINDS` in `public-run/index.html`). A quest's kind comes from `wsKindOfQuest`, and `wsQuestOk` decides which quests get a **Code it** button.
+
+| Kind | Tabs (slot) | Quests | How it runs |
+|---|---|---|---|
+| `web` | index.html (html), style.css (css), script.js (js) | Phases 1–4 practice and projects | Files are joined into one page. |
+| `react` | index.html, style.css, App.jsx (js) | Phase 5 | Babel compiles JSX and imports. React 18 and React Router 6 load from jsDelivr. |
+| `sql` | query.sql (js) | Phase 8, first four practice quests | Each run starts a fresh PostgreSQL (PGlite, WASM, from jsDelivr). Statements run one by one and each result shows as a table. |
+| `node` | server.js (js), module.js (css), .env (html) | Phase 6 and 7 practice (not the opening "sketch it" quests), Express project | See below. |
+
+Older projects saved without `kind` get one from their quest, or `web` otherwise.
+
+### Node and Express (`node` kind)
+
+A browser can't run Node, so the runner provides small stand-ins for what the Node and Express quests use. It is **not** real Node.
+
+- `server.js` and `module.js` run as CommonJS modules (`require`, `module.exports`, `exports`, `__dirname`). Each one is loaded as its own blob script, so errors point at the right file and line, including syntax errors.
+- `.env` is loaded into `process.env` on every run, like `node --env-file=.env`. `require("dotenv").config()` also works. `process.exit()` stops the script.
+- `require` can load `http`, `express`, `dotenv`, `./module.js` and `./server.js` (`node:` prefixes work). Any other module gives a "Cannot find module" error that lists what's available.
+- `http.createServer` supports `writeHead`, `setHeader`, `write`, `end`, and body `data`/`end` events. Sending an object with `res.end()` is a TypeError, as it is in Node.
+- `express` follows Express 5 behaviour. It supports `get`, `post`, `put`, `patch`, `delete`, `all`, `use`, `route`, `Router()`, `:params`, `req.query`, `express.json()` and `express.urlencoded()` (`req.body` stays `undefined` without them), and `status`, `json`, `send`, `sendStatus` and `redirect`. Middleware and four-argument error handlers work, and so do thrown and async errors. Unmatched routes get `Cannot GET /path`, and answering twice gives `ERR_HTTP_HEADERS_SENT`.
+- Once a server calls `listen()`, the preview shows a request panel (method, path, JSON body). The first request goes to the app's first plain GET route, or `/`. The last request is saved per project in the runner's `localStorage` and replayed on every run, so a code change shows its new response straight away. A request with no answer after 5 seconds is reported. HTML responses render in a sandboxed frame with scripts disabled.
+- Server state lives in memory and starts fresh on every run. Real npm packages, databases and the file system aren't available.
+
+**Known issue:** after an endless loop, the Workshop marks the run as stuck and removes the preview, but the loop keeps the runner site's browser process busy. Any kind can hit this (`while (true)`, or a SQL query that never ends). The next run then reports stuck too. Seen in Chrome on 2026-10-14 and not yet fixed.
+
 ## How saving works
 
 The game still reads and writes its own localStorage keys. `sync.js`:
