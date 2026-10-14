@@ -24,6 +24,7 @@
     if(m.type !== "hq-run") return;
     if(window.opener) window.opener = null;   // a preview tab can't redirect the app tab
     var kind = KINDS[m.kind] ? m.kind : "web", origin = e.origin;
+    if(kind === "sql") return runSql(String(m.js||""), origin, m.runId);
     var go = function(){
       var built = build(String(m.html||""), String(m.css||""), String(m.js||""), origin, m.runId, kind);
       host.postMessage({type:"hq-wait", runId:m.runId, ms:3500}, origin);   // libraries are in; back to the normal stuck timer
@@ -45,7 +46,8 @@
       // development builds: their warnings (missing keys, bad hooks) are part of learning React
       libs: [NPM + "react@18.3.1/umd/react.development.js", NPM + "react-dom@18.3.1/umd/react-dom.development.js"],
       router: [NPM + "@remix-run/router@1.23.2/dist/router.umd.min.js", NPM + "react-router@6.30.6/dist/umd/react-router.development.js",
-        NPM + "react-router-dom@6.30.6/dist/umd/react-router-dom.development.js"] }
+        NPM + "react-router-dom@6.30.6/dist/umd/react-router-dom.development.js"] },
+    sql:   { js:"query.sql", pglite: NPM + "@electric-sql/pglite@0.5.9/dist/index.js" }
   };
   // import/require inside App.jsx. Kept on one line so it doesn't shift line numbers.
   var REQUIRE = "var exports={},module={exports:exports};function require(n){var m={'react':window.React,'react-dom':window.ReactDOM,'react-dom/client':window.ReactDOM," +
@@ -61,6 +63,83 @@
       var line = err.loc && err.loc.line || 1, msg = String(err.message||err).replace(/^.*?: /, "").split("\n")[0];
       return new Array(line).join("\n") + "throw new SyntaxError(" + JSON.stringify(msg) + ");";
     }
+  }
+
+  /* ---------- SQL: a fresh PostgreSQL (PGlite) per run; statements run one by one so each shows its result ---------- */
+  function runSql(src, origin, runId){
+    var say = function(level, text, line){ host.postMessage({type:"hq-console", runId:runId, level:level, text:text, line:line||0}, origin); };
+    var out = [];
+    var page = function(){
+      host.postMessage({type:"hq-wait", runId:runId, ms:3500}, origin);
+      var body = out.join("") || "<p class=\"none\">Nothing to run yet. Write some SQL in query.sql.</p>";
+      document.open(); document.write("<!DOCTYPE html>\n<html lang=\"en\">\n<head>" + shim(origin, runId, "query.sql") + "<meta charset=\"UTF-8\"><style>" + SQL_CSS + "</style></head><body>" + body + "</body></html>"); document.close();
+    };
+    host.postMessage({type:"hq-wait", runId:runId, ms:60000}, origin);   // first run downloads the database (a few MB)
+    import(KINDS.sql.pglite).then(function(mod){ return mod.PGlite.create(); }).then(function(db){
+      host.postMessage({type:"hq-wait", runId:runId, ms:8000}, origin);   // a query that runs longer than this is treated as stuck
+      var parts = splitSql(src), i = 0;
+      var next = function(){
+        if(i >= parts.length) return page();
+        var p = parts[i++];
+        return db.query(p.text).then(function(r){ out.push(sqlResult(p, r)); return next(); }, function(err){
+          var line = p.line + (err.position ? lineOf(p.text, Number(err.position) - 1) : 0);
+          var msg = "ERROR: " + err.message + (err.detail ? "\n" + err.detail : "") + (err.hint ? "\nHint: " + err.hint : "");
+          say("error", msg, line);
+          out.push("<section class=\"err\"><pre class=\"stmt\">" + escHtml(head(p.text)) + "</pre><p>" + escHtml(msg) + "</p><p class=\"meta\">query.sql line " + line +
+            (i < parts.length ? " · stopped here, " + (parts.length - i) + " more statement" + (parts.length - i === 1 ? "" : "s") + " not run" : "") + "</p></section>");
+          page();
+        });
+      };
+      next();
+    }).catch(function(e){ say("error", "Couldn't start the database (" + (e && e.message || e) + "). Check your connection, then press Run."); page(); });
+  }
+  var SQL_CSS = "body{margin:0;padding:12px;font:13px/1.5 system-ui,sans-serif;color:#26282f;background:#fff}section{margin:0 0 14px}" +
+    ".stmt{margin:0 0 4px;font:12px ui-monospace,monospace;color:#555961;white-space:pre-wrap}.meta,.none{color:#6b6f78;margin:2px 0}" +
+    "table{border-collapse:collapse;font:12px ui-monospace,monospace}th,td{border:1px solid #d6d8dc;padding:3px 8px;text-align:left;vertical-align:top}" +
+    "th{background:#f2f3ef}td.null{color:#9a9ea6;font-style:italic}.ok{color:#2f7d32;margin:0}.err p{margin:2px 0;color:#b3261e;white-space:pre-wrap}";
+  var escHtml = function(s){ return String(s).replace(/[&<>"]/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]; }); };
+  var lineOf = function(s, idx){ return s.slice(0, Math.max(0, idx)).split("\n").length - 1; };
+  // the statement without its leading comments, first line only: what the result is labelled with
+  var head = function(t){ var l = t.replace(/^(\s*(--[^\n]*|\/\*[\s\S]*?\*\/))*\s*/, "").split("\n"); return l[0].slice(0, 100) + (l.length > 1 || l[0].length > 100 ? " …" : ""); };
+  function cell(v){
+    if(v === null || v === undefined) return "<td class=\"null\">NULL</td>";
+    if(v instanceof Date) v = isNaN(v) ? String(v) : v.toISOString();
+    else if(v instanceof Uint8Array) v = "\\x" + Array.prototype.map.call(v, function(b){ return (b < 16 ? "0" : "") + b.toString(16); }).join("");
+    else if(typeof v === "object") v = JSON.stringify(v);
+    return "<td>" + escHtml(v) + "</td>";
+  }
+  function sqlResult(p, r){
+    var h = "<section><pre class=\"stmt\">" + escHtml(head(p.text)) + "</pre>", fields = r.fields || [], rows = r.rows || [], MAX = 200;
+    if(fields.length){
+      h += "<table><thead><tr>" + fields.map(function(f){ return "<th>" + escHtml(f.name) + "</th>"; }).join("") + "</tr></thead><tbody>" +
+        rows.slice(0, MAX).map(function(row){ return "<tr>" + fields.map(function(f){ return cell(row[f.name]); }).join("") + "</tr>"; }).join("") + "</tbody></table>" +
+        "<p class=\"meta\">" + rows.length + " row" + (rows.length === 1 ? "" : "s") + (rows.length > MAX ? ", first " + MAX + " shown" : "") + "</p>";
+    }else{
+      var verb = head(p.text).split(/\s+/).slice(0, 2).join(" ").toUpperCase().replace(/[^A-Z ]/g, "").trim();
+      var n = /^(INSERT|UPDATE|DELETE|MERGE)/.test(verb) && typeof r.affectedRows === "number" ? " · " + r.affectedRows + " row" + (r.affectedRows === 1 ? "" : "s") : "";
+      h += "<p class=\"ok\">✓ " + escHtml((/^(INSERT|UPDATE|DELETE|MERGE)/.exec(verb) || [verb])[0]) + n + "</p>";
+    }
+    return h + "</section>";
+  }
+  // split on ; outside strings, quoted names, comments and $tag$ bodies; remember where each statement starts
+  function splitSql(src){
+    var out = [], start = 0, i = 0, n = src.length;
+    var push = function(end){
+      var raw = src.slice(start, end), lead = raw.match(/^\s*/)[0].length, text = raw.slice(lead).replace(/\s+$/, "");
+      if(text.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, "").trim()) out.push({ text:text, line:lineOf(src, start + lead) + 1 });
+      start = end + 1;
+    };
+    while(i < n){
+      var c = src[i], d = src[i + 1];
+      if(c === "-" && d === "-"){ i = src.indexOf("\n", i); if(i < 0) i = n; continue; }
+      if(c === "/" && d === "*"){ i = src.indexOf("*/", i + 2); i = i < 0 ? n : i + 2; continue; }
+      if(c === "'" || c === "\""){ var j = i + 1; while(j < n && !(src[j] === c && src[j + 1] !== c)){ j += src[j] === c ? 2 : 1; } i = j + 1; continue; }
+      if(c === "$"){ var t = /^\$[A-Za-z_]*\$/.exec(src.slice(i, i + 64)); if(t){ var e2 = src.indexOf(t[0], i + t[0].length); i = e2 < 0 ? n : e2 + t[0].length; continue; } }
+      if(c === ";") push(i);
+      i++;
+    }
+    push(n);
+    return out;
   }
 
   function esc(s, tag){ return s.replace(new RegExp("</" + tag, "gi"), "<\\/" + tag); }

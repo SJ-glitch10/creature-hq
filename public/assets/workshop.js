@@ -10,16 +10,19 @@ const RUN_ORIGIN = location.hostname==="localhost" ? "http://127.0.0.1:5174" : l
 // a project's kind decides how the runner treats its three files and what the tabs are called
 const WS_KINDS = {
   web:  { files:[["html","index.html"],["css","style.css"],["js","script.js"]] },
-  react:{ files:[["html","index.html"],["css","style.css"],["js","App.jsx"]] }
+  react:{ files:[["html","index.html"],["css","style.css"],["js","App.jsx"]], lang:"jsx" },
+  // one SQL file, kept in the js slot; a fresh PostgreSQL database runs it on every run
+  sql:  { files:[["js","query.sql"]], lang:"sql" }
 };
-const wsKindOfPhase = pi => pi===5 ? "react" : "web";
-const wsKind = p => { if(p&&WS_KINDS[p.kind]) return p.kind; const q=p&&p.questId?questOf(p.questId):null; return q?wsKindOfPhase(q.pi):"web"; };
+// phase 8's first four practice quests are plain SQL; connecting Node to PostgreSQL needs a server
+const wsKindOfQuest = (pi,si,qi) => pi===5 ? "react" : pi===8&&si===1&&qi<4 ? "sql" : "web";
+const wsKind = p => { if(p&&WS_KINDS[p.kind]) return p.kind; const q=p&&p.questId?questOf(p.questId):null; return q?wsKindOfQuest(q.pi,q.si,q.qi):"web"; };
 const wsFiles = p => WS_KINDS[wsKind(p)].files;
-const wsJsName = p => wsFiles(p)[2][1];
+const wsJsName = p => wsFiles(p).find(([k])=>k==="js")[1];
 const WS_MAX = 100000;                 // characters per file (matches firestore.rules)
 const WS_SAVE_IDLE = 2000, WS_SAVE_MAX = 10000, WS_RUN_DELAY = 700, WS_STUCK_MS = 3500;
-// quests you can build in the browser: HTML, CSS, JavaScript, API and React phases, practice and project stages
-const wsQuestOk = (pi,si) => pi>=1 && pi<=5 && ["Tiny Wins","Project","Projects"].includes(phases[pi].stages[si][0]);
+// quests you can build in the browser: HTML, CSS, JavaScript, API and React practice and project stages, and the SQL practice quests
+const wsQuestOk = (pi,si,qi) => (pi>=1 && pi<=5 && ["Tiny Wins","Project","Projects"].includes(phases[pi].stages[si][0])) || wsKindOfQuest(pi,si,qi)==="sql";
 
 const ws = { list:null, loading:false, error:"", cur:null, editor:null, editorLoading:null,
   dirty:false, saving:false, saveIdle:null, saveMax:null, lastSaveErr:false,
@@ -44,7 +47,9 @@ const WS_TEMPLATES = {
     js:'// Runs after the page loads. Try changing what the button does.\nconst button = document.querySelector("#poke");\nconst count = document.querySelector("#count");\nlet clicks = 0;\n\nbutton.addEventListener("click", () => {\n  clicks = clicks + 1;\n  count.textContent = clicks;\n  console.log("poked", clicks, "times");\n});\n' } }
 };
 function wsQuestTemplate(t){
-  const kind=wsKindOfPhase(t.pi);
+  const kind=wsKindOfQuest(t.pi,t.si,t.qi);
+  if(kind==="sql") return { name:t.q.slice(0,60), questId:t.id, kind, files:{ html:"", css:"",
+    js:'-- Quest: '+t.q+'\n-- A real PostgreSQL database runs in your browser. It starts empty on every run,\n-- then runs this file top to bottom. Each statement\'s result shows in the preview.\n\nCREATE TABLE creatures (\n  id SERIAL PRIMARY KEY,\n  name TEXT NOT NULL,\n  level INTEGER DEFAULT 1\n);\n\nINSERT INTO creatures (name, level) VALUES (\'Gobbit\', 3), (\'Blip\', 7);\n\nSELECT * FROM creatures ORDER BY level DESC;\n' } };
   if(kind==="react") return { name:t.q.slice(0,60), questId:t.id, kind, files:{
     html:wsPage(esc(t.q),'  <!-- Quest: '+t.q.replace(/--/g,"-")+' -->\n  <!-- React renders into #root. Write your components in App.jsx. -->\n  <div id="root"></div>',"","App.jsx"),
     css:"/* Styles for this page */\n",
@@ -90,7 +95,7 @@ function wsRenderGallery(el){
     if(!ws.loading&&!ws.error) wsLoadList().then(()=>{ if(view==="workshop"&&!ws.cur) renderWorkshop(); });
     return;
   }
-  const n=upNext(), nq=n&&wsQuestOk(n.pi,n.si)?questOf(qid(n.pi,n.si,n.qi)):null;
+  const n=upNext(), nq=n&&wsQuestOk(n.pi,n.si,n.qi)?questOf(qid(n.pi,n.si,n.qi)):null;
   const linked=nq&&ws.list.find(p=>p.questId===nq.id);
   const starts=[
     nq?'<button type="button" class="ws-start quest" data-act="ws-quest" data-id="'+nq.id+'"><span class="ws-start-ico">'+ic(phases[nq.pi].icon)+'</span><span><small>'+(linked?'Continue your quest':'Your next quest')+' · '+esc(phases[nq.pi].short)+'</small><b>'+esc(nq.q)+'</b></span></button>':'',
@@ -150,7 +155,7 @@ function wsMountEditor(el){
   wsEditorModule().then(mod=>{
     if(!ws.cur||!$("wsEditor")) return;
     $("wsEditor").innerHTML="";
-    ws.editor=mod.createEditor({ parent:$("wsEditor"), files:ws.cur.files, active:ws.cur.file||"html", jsx:wsKind(ws.cur)==="react",
+    ws.editor=mod.createEditor({ parent:$("wsEditor"), files:ws.cur.files, active:ws.cur.file||"html", jsLang:WS_KINDS[wsKind(ws.cur)].lang||"js",
       onChange:(name,val)=>{ ws.cur.files[name]=val; wsChanged(true); },
       onRun:()=>wsRun(true), onSave:()=>wsSaveNow() });
     wsRenderBar();
@@ -178,7 +183,7 @@ function wsRenderBar(){
 /* ---------- open / create / delete ---------- */
 async function wsOpen(p){
   await wsFlush();
-  ws.cur={id:p.id,name:p.name,questId:p.questId||null,kind:wsKind(p),files:{html:p.files.html||"",css:p.files.css||"",js:p.files.js||""},file:"html"};
+  ws.cur={id:p.id,name:p.name,questId:p.questId||null,kind:wsKind(p),files:{html:p.files.html||"",css:p.files.css||"",js:p.files.js||""},file:wsFiles(p)[0][0]};
   ws.logs=[]; ws.paused=false; ws.dirty=false; ws.lastSaveErr=false; ws.lastErrCount=0;
   if(ws.editor){ ws.editor.destroy(); ws.editor=null; }
   const el=$("view-workshop"); el.innerHTML="";
@@ -309,7 +314,7 @@ function wsRenderLogs(){
   $("wsCounts").innerHTML=(errs?'<span class="c-err">'+errs+'</span>':'')+(warns?'<span class="c-warn">'+warns+'</span>':'');
   ol.innerHTML=ws.logs.length?ws.logs.map(x=>'<li class="lv-'+x.level+'">'+(x.level==="error"?ic("warn"):x.level==="warn"?ic("warn"):'<span class="ws-caret" aria-hidden="true">›</span>')+
       '<span class="ws-log-text">'+esc(x.text)+'</span>'+(x.line?'<button type="button" class="ws-line" data-act="ws-goto" data-line="'+x.line+'" title="Show this line">'+esc(wsJsName(ws.cur))+':'+x.line+'</button>':'')+'</li>').join("")
-    :'<li class="ws-log-empty">'+(ws.runState==="loading"?"Running":ws.runState==="stuck"?"Stopped. The page never finished loading.":"Nothing logged. Use console.log() in "+esc(wsJsName(ws.cur))+" to print here.")+'</li>';
+    :'<li class="ws-log-empty">'+(ws.runState==="loading"?"Running":ws.runState==="stuck"?"Stopped. The page never finished loading.":ws.cur.kind==="sql"?"No errors. Results show in the preview.":"Nothing logged. Use console.log() in "+esc(wsJsName(ws.cur))+" to print here.")+'</li>';
   ol.scrollTop=ol.scrollHeight;
 }
 // the companion notices errors and fixes, without nagging

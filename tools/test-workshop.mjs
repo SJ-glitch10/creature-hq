@@ -140,6 +140,78 @@ await test("react: empty App.jsx loads with no errors", async () => {
   assert.deepEqual(errorsOf(out), []);
   assert.ok(out.some(x=>x[0]==="hq-loaded"));
 });
+// SQL: results are rendered into the preview, so read them from the runner frame
+const runSql = async js => {
+  const [out, html] = await page.evaluate(js => new Promise(res => {
+    const f = document.createElement("iframe"); f.src = "http://localhost:5174/"; document.body.appendChild(f);
+    const out = [], runId = Math.random(), t = setTimeout(() => { out.push(["TIMEOUT"]); res([out, ""]); }, 45000);
+    addEventListener("message", function h(e){ if(e.source !== f.contentWindow) return; const m = e.data;
+      if(m.type === "hq-ready") return f.contentWindow.postMessage({ type:"hq-run", runId, kind:"sql", html:"", css:"", js }, "http://localhost:5174");
+      out.push(m.type === "hq-console" ? [m.level, m.text, m.line] : [m.type]);
+      if(m.type === "hq-loaded"){ clearTimeout(t); removeEventListener("message", h); f.dataset.done = "1"; res([out, ""]); }
+    });
+  }), js);
+  const frame = page.frames().find(f => f.url().startsWith("http://localhost:5174") && f.parentFrame());
+  const text = frame ? await frame.evaluate(() => document.body.innerText) : "";
+  await page.evaluate(() => document.querySelectorAll("iframe").forEach(f => f.remove()));
+  return { out, text, errors: errorsOf(out) };
+};
+await test("sql: create, insert, select render a result table", async () => {
+  const r = await runSql("CREATE TABLE c (id SERIAL PRIMARY KEY, name TEXT);\nINSERT INTO c (name) VALUES ('Gobbit'), ('Blip');\nSELECT * FROM c ORDER BY id;\n");
+  assert.deepEqual(r.errors, []);
+  assert.ok(r.out.some(x => x[0] === "hq-loaded"));
+  assert.match(r.text, /✓ CREATE TABLE/);
+  assert.match(r.text, /✓ INSERT · 2 rows/);
+  assert.match(r.text, /id\s+name\s+1\s+Gobbit\s+2\s+Blip\s+2 rows/);
+});
+await test("sql: error points at the right line and stops the run", async () => {
+  const r = await runSql("-- header\nCREATE TABLE t (a INT);\n\nSELECT a,\n  nope\nFROM t;\nSELECT 1;\n");
+  assert.deepEqual(r.errors.map(e => [e[1].split("\n")[0], e[2]]), [["ERROR: column \"nope\" does not exist", 5]]);
+  assert.match(r.text, /stopped here, 1 more statement not run/);
+});
+await test("sql: semicolons inside strings, quoted names, comments and $$ bodies don't split", async () => {
+  const r = await runSql("CREATE TABLE \"we;ird\" (v TEXT);\nINSERT INTO \"we;ird\" VALUES ('a;b'), ('it''s;');\n-- a comment; with semicolons\n/* block; comment */\nDO $$ BEGIN PERFORM 1; END $$;\nDO $fn$ BEGIN PERFORM 2; END $fn$;\nSELECT v FROM \"we;ird\" ORDER BY v\n");
+  assert.deepEqual(r.errors, []);
+  assert.match(r.text, /a;b\s+it's;\s+2 rows/);
+  assert.equal((r.text.match(/✓/g) || []).length, 4);
+});
+await test("sql: constraint errors include Postgres' detail", async () => {
+  const r = await runSql("CREATE TABLE u (email TEXT UNIQUE);\nINSERT INTO u VALUES ('a@x');\nINSERT INTO u VALUES ('a@x');\n");
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0][1], /duplicate key value violates unique constraint[\s\S]*Key \(email\)=\(a@x\) already exists/);
+  assert.equal(r.errors[0][2], 3);
+});
+await test("sql: every run starts from an empty database", async () => {
+  for(let k = 0; k < 2; k++) assert.deepEqual((await runSql("CREATE TABLE once (a INT);")).errors, []);
+});
+await test("sql: NULL, booleans, JSON, dates, numbers and joins display", async () => {
+  const r = await runSql("CREATE TABLE a (id INT PRIMARY KEY, n TEXT);\nCREATE TABLE b (a_id INT REFERENCES a(id), x NUMERIC);\nINSERT INTO a VALUES (1, 'one'), (2, NULL);\nINSERT INTO b VALUES (1, 2.50);\n" +
+    "SELECT a.n, b.x, true AS t, '{\"k\":1}'::json AS j, DATE '2026-01-02' AS d FROM a LEFT JOIN b ON b.a_id = a.id ORDER BY a.id;");
+  assert.deepEqual(r.errors, []);
+  assert.match(r.text, /one\s+2.50\s+true\s+\{"k":1\}\s+2026-01-02/);
+  assert.match(r.text, /NULL\s+NULL\s+true/);
+});
+await test("sql: empty file and comment-only file load with a hint, no errors", async () => {
+  for(const js of ["", "-- nothing yet\n/* still nothing; */\n"]){
+    const r = await runSql(js);
+    assert.deepEqual(r.errors, []);
+    assert.match(r.text, /Nothing to run yet/);
+  }
+});
+await test("sql: unterminated string is a Postgres error, not a runner crash", async () => {
+  const r = await runSql("SELECT 'oops;\nSELECT 1;");
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0][1], /unterminated quoted string/);
+  assert.ok(r.out.some(x => x[0] === "hq-loaded"));
+});
+await test("sql: HTML in results is shown as text", async () => {
+  const r = await runSql("SELECT '<img src=x onerror=alert(1)>' AS v;");
+  assert.match(r.text, /<img src=x onerror=alert\(1\)>/);
+});
+await test("sql: more than 200 rows shows the first 200", async () => {
+  const r = await runSql("SELECT g FROM generate_series(1, 250) g;");
+  assert.match(r.text, /250 rows, first 200 shown/);
+});
 await test("runner ignores messages from origins that aren't the app", async () => {
   const p2 = await browser.newPage();
   await p2.goto("http://localhost:5174/");   // same-origin parent that isn't allowed: opened directly, no host
@@ -161,13 +233,16 @@ await app.evaluate(() => { document.getElementById("titleRoot").innerHTML = ""; 
 const W = (fn, arg) => app.evaluate(fn, arg);
 const waitRun = () => app.waitForFunction(() => ws.runState === "ok" || ws.runState === "stuck", null, { timeout: 40000 });
 
-await test("wsQuestOk: phases 1-5 practice/project stages only", async () => {
-  assert.deepEqual(await W(() => [wsQuestOk(1,1), wsQuestOk(4,2), wsQuestOk(5,1), wsQuestOk(5,2), wsQuestOk(5,0), wsQuestOk(0,1), wsQuestOk(6,1), wsQuestOk(8,1)]),
-    [true, true, true, true, false, false, false, false]);
+await test("wsQuestOk: phases 1-5 practice/project stages and the SQL practice quests only", async () => {
+  assert.deepEqual(await W(() => [wsQuestOk(1,1,0), wsQuestOk(4,2,1), wsQuestOk(5,1,0), wsQuestOk(5,2,0), wsQuestOk(5,0,0), wsQuestOk(0,1,0), wsQuestOk(6,1,0),
+    wsQuestOk(8,1,0), wsQuestOk(8,1,3), wsQuestOk(8,1,4), wsQuestOk(8,0,0), wsQuestOk(8,2,0)]),
+    [true, true, true, true, false, false, false, true, true, false, false, false]);
+  assert.deepEqual(await W(() => phases[8].stages[1][1].slice(0, 5)), ["Create a users table","Insert and query rows","Create two related tables","Write a JOIN query","Connect Node to PostgreSQL"]);
 });
-await test("wsKind: stored kind wins, else from the quest's phase, else web", async () => {
+await test("wsKind: stored kind wins, else from the quest, else web", async () => {
   assert.deepEqual(await W(() => [wsKind({}), wsKind({questId:"1-1-0"}), wsKind({questId:"5-1-0"}), wsKind({kind:"web",questId:"5-1-0"}),
-    wsKind({kind:"bogus",questId:"5-1-0"}), wsKind({questId:"99-0-0"}), wsKind(null)]), ["web","web","react","web","react","web","web"]);
+    wsKind({kind:"bogus",questId:"5-1-0"}), wsKind({questId:"99-0-0"}), wsKind(null), wsKind({questId:"8-1-2"}), wsKind({questId:"8-1-4"})]),
+    ["web","web","react","web","react","web","web","sql","web"]);
 });
 await test("web starter project: runs, logs nothing bad, saves kind web", async () => {
   await W(() => { go("workshop"); return wsCreate(WS_TEMPLATES.starter); });
@@ -238,6 +313,30 @@ await test("an old project saved without kind opens with the right kind", async 
     assert.deepEqual(await W(() => ws.logs.map(l => l.text)), [log]);
     await W(() => wsBack());
   }
+});
+await test("SQL quest: one query.sql tab, template runs, error line links to query.sql, kind saved", async () => {
+  await W(() => wsQuest("8-1-0"));
+  await waitRun();
+  assert.equal(await W(() => ws.runState), "ok");
+  assert.deepEqual(await W(() => ws.logs), []);
+  assert.deepEqual(await W(() => [...document.querySelectorAll(".ws-file")].map(b => b.textContent)), ["query.sql"]);
+  assert.equal(await W(() => ws.editor.active), "js");
+  const frame = app.frames().find(f => f.url().startsWith("http://localhost:5174"));
+  assert.match(await frame.evaluate(() => document.body.innerText), /Blip\s+7[\s\S]*Gobbit\s+3/);
+  await W(() => { ws.cur.files.js = "SELECT 1;\nSELECT nope;\n"; wsRun(true); });
+  await waitRun();
+  await app.waitForFunction(() => ws.logs.some(l => l.level === "error"));
+  assert.equal(await W(() => document.querySelector(".ws-line").textContent), "query.sql:2");
+  const p = await W(() => Object.values(JSON.parse(localStorage.getItem("hqProjects"))).find(x => x.questId === "8-1-0"));
+  assert.equal(p.kind, "sql");
+  await W(() => wsBack());
+});
+await test("SQL: a query that never finishes is reported as stuck", async () => {
+  await W(() => wsQuest("8-1-0"));
+  await W(() => { ws.cur.files.js = "SELECT count(*) FROM generate_series(1, 1000000000000);"; wsRun(true); });
+  await app.waitForFunction(() => ws.runState === "stuck", null, { timeout: 90000 });
+  assert.equal(await W(() => document.getElementById("wsStuck").hidden), false);
+  await W(() => wsBack());
 });
 await test("no uncaught errors in the app page", async () => {
   assert.deepEqual(await W(() => window.__errs || []), []);
