@@ -7,6 +7,9 @@ Hosted on Firebase: sign-in with Firebase Auth (Google + email/password), one Fi
 
 ## Layout
 
+For a detailed map (runtime flow, `game.js` sections, data model, known issues) see [MAP.md](MAP.md).
+
+
 | Path | What it is |
 | --- | --- |
 | `public/index.html` | Landing page (indexed by search engines). Generated. |
@@ -23,10 +26,11 @@ Hosted on Firebase: sign-in with Firebase Auth (Google + email/password), one Fi
 | `public/assets/workshop.js` | The Workshop: project gallery, editor, live preview and console. |
 | `public/assets/editor.js` | CodeMirror 6, bundled from `tools/editor-entry.js` by `npm run build:editor`. |
 | `public-run/index.html` | The preview runner, deployed to its own site (creature-hq-run.web.app). |
+| `tools/body.html` | App shell markup that `build-app.mjs` wraps into `app.html`. |
 
 ## The Workshop
 
-An HTML/CSS/JavaScript editor with a live preview. Each project is its own Firestore document, `users/{uid}/projects/{id}`, holding three files of up to 100 KB each (enforced in `firestore.rules`).
+An HTML/CSS/JavaScript editor with a live preview. Quests from phases 1–4 (HTML, CSS, JavaScript, APIs) can be built in it. Each project is its own Firestore document, `users/{uid}/projects/{id}`, holding three files of up to 100 KB each (enforced in `firestore.rules`).
 
 Student code never runs on creature-hq.web.app. The preview is an iframe of **creature-hq-run.web.app**, a separate Firebase Hosting site. The app sends the files with `postMessage`, the runner writes them into a fresh page and reports `console` output and errors back, labelled `script.js:<line>`. Because it's a different site:
 
@@ -89,7 +93,7 @@ npx serve public-run -l 5174
 npx firebase-tools deploy --only hosting,firestore:rules --project creature-hq
 ```
 
-Bump `?v=14` in `tools/build-app.mjs`, `tools/build-site.mjs` and `sync.js` when you change assets, so browsers fetch the new files.
+Bump `?v=16` everywhere it appears (`tools/build-app.mjs`, `tools/build-site.mjs`, `public/assets/sync.js`, `public/assets/workshop.js`) when you change assets, so browsers fetch the new files. `grep -rn 'v=16' public/assets tools` finds them all.
 
 ## Bugs fixed from v13
 
