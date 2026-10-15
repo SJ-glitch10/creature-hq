@@ -88,7 +88,7 @@ async function wsLoadList(force){
   ws.loading=false;
 }
 function wsEditorModule(){
-  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=18").catch(e=>{ ws.editorLoading=null; throw e; }));
+  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=19").catch(e=>{ ws.editorLoading=null; throw e; }));
 }
 
 /* ---------- view ---------- */
@@ -291,7 +291,7 @@ function wsRun(manual){
   // the runner is another origin, so allow-same-origin gives it that origin (working localStorage/fetch), never ours
   f.setAttribute("sandbox","allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox");
   f.setAttribute("allow","clipboard-write");
-  f.src=RUN_ORIGIN+"/?v=18";
+  f.src=RUN_ORIGIN+"/?v=19";
   $("wsFrameWrap").appendChild(f); ws.frame=f;
   ws.stuckTimer=setTimeout(wsStuck,WS_STUCK_MS+2000);   // generous first timer covers loading the runner page
 }
