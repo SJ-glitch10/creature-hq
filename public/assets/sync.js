@@ -15,10 +15,10 @@ import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp, Timestamp, connectFirestoreEmulator,
   collection, getDocs, query, orderBy, limit
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
-import { firebaseConfig } from "./firebase-config.js?v=16";
+import { firebaseConfig } from "./firebase-config.js?v=17";
 
 // workshop.js before game.js: the game draws its first screen as soon as it loads
-const GAME_SCRIPTS = ["/assets/quiz.js?v=16", "/assets/workshop.js?v=16", "/assets/game.js?v=16"];
+const GAME_SCRIPTS = ["/assets/quiz.js?v=17", "/assets/workshop.js?v=17", "/assets/game.js?v=17"];
 const MAX_SAVE_CHARS = 900000;          // Firestore documents top out at 1 MiB
 const WRITE_DELAY = 1500;
 
@@ -96,7 +96,7 @@ function localProjects(){
   const all=()=>{ try{ return JSON.parse(ls.get(KEY)||"{}")||{}; }catch(e){ return {}; } };
   return {
     async list(){ return Object.entries(all()).map(([id,p])=>({id,...p})).sort((a,b)=>b.updatedAt-a.updatedAt); },
-    async save(id,p){ const a=all(); a[id]={name:p.name,files:p.files,questId:p.questId||null,createdAt:(a[id]&&a[id].createdAt)||Date.now(),updatedAt:Date.now()}; ls.set(KEY,JSON.stringify(a)); },
+    async save(id,p){ const a=all(); a[id]={name:p.name,files:p.files,questId:p.questId||null,kind:p.kind||"web",createdAt:(a[id]&&a[id].createdAt)||Date.now(),updatedAt:Date.now()}; ls.set(KEY,JSON.stringify(a)); },
     async remove(id){ const a=all(); delete a[id]; ls.set(KEY,JSON.stringify(a)); }
   };
 }
@@ -189,11 +189,11 @@ function start(){
     return {
       async list(){
         const snap = await getDocs(query(col, orderBy("updatedAt","desc"), limit(PROJECT_LIMIT)));
-        return snap.docs.map(d=>{ const x=d.data(); created[d.id]=x.createdAt; return {id:d.id, name:x.name, files:x.files||{}, questId:x.questId||null, createdAt:ms(x.createdAt), updatedAt:ms(x.updatedAt)}; });
+        return snap.docs.map(d=>{ const x=d.data(); created[d.id]=x.createdAt; return {id:d.id, name:x.name, files:x.files||{}, questId:x.questId||null, kind:x.kind||null, createdAt:ms(x.createdAt), updatedAt:ms(x.updatedAt)}; });
       },
       async save(id, p){
         if(!created[id]) created[id]=Timestamp.now();
-        await setDoc(doc(col, id), { name:String(p.name).slice(0,60), questId:p.questId||null,
+        await setDoc(doc(col, id), { name:String(p.name).slice(0,60), questId:p.questId||null, kind:p.kind||"web",
           files:{ html:p.files.html||"", css:p.files.css||"", js:p.files.js||"" },
           createdAt:created[id], updatedAt:serverTimestamp() });
       },

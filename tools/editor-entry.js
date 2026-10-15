@@ -8,9 +8,10 @@ import { indentUnit, HighlightStyle, syntaxHighlighting } from "@codemirror/lang
 import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 import { javascript } from "@codemirror/lang-javascript";
+import { sql, PostgreSQL } from "@codemirror/lang-sql";
 import { tags as t } from "@lezer/highlight";
 
-const LANGS = { html: () => html({ autoCloseTags: true }), css: () => css(), js: () => javascript() };
+const LANGS = { html: () => html({ autoCloseTags: true }), css: () => css(), js: mode => mode === "sql" ? sql({ dialect: PostgreSQL }) : javascript({ jsx: mode === "jsx" }) };
 
 // colours come from CSS variables so the editor follows the app's light/dark theme
 const highlight = HighlightStyle.define([
@@ -48,7 +49,7 @@ const theme = EditorView.theme({
   ".cm-searchMatch": { backgroundColor: "var(--amber-soft)", outline: "1px solid var(--amber)" }
 });
 
-export function createEditor({ parent, files, active, onChange, onRun, onSave }) {
+export function createEditor({ parent, files, active, jsLang = "js", onChange, onRun, onSave }) {
   const lang = new Compartment();
   const extensions = name => [
     basicSetup,
@@ -59,7 +60,7 @@ export function createEditor({ parent, files, active, onChange, onRun, onSave })
     ]),
     indentUnit.of("  "),
     EditorState.tabSize.of(2),
-    lang.of(LANGS[name]()),
+    lang.of(LANGS[name](jsLang)),
     syntaxHighlighting(highlight),
     theme,
     EditorView.lineWrapping,
