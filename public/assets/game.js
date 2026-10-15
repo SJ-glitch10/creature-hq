@@ -1263,6 +1263,7 @@ function go(v, focusQuestId){
   view=v; try{ localStorage.setItem("hqView",v); }catch(e){}
   VIEWS.forEach(x=>{ $("view-"+x).hidden = x!==v; });
   renderTabs(); renderView();
+  if(typeof tutorSync==="function") tutorSync();   // the floating creature and folded card belong to the Workshop only
   const tb=document.querySelector(".topbar"), top=tb.getBoundingClientRect().top+scrollY;
   if(scrollY>top) scrollTo(0,top);
   if(focusQuestId){

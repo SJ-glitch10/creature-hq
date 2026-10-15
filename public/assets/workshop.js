@@ -88,13 +88,14 @@ async function wsLoadList(force){
   ws.loading=false;
 }
 function wsEditorModule(){
-  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=19").catch(e=>{ ws.editorLoading=null; throw e; }));
+  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=20").catch(e=>{ ws.editorLoading=null; throw e; }));
 }
 
 /* ---------- view ---------- */
 function renderWorkshop(){
   const el=$("view-workshop");
   document.body.classList.toggle("ws-open", !!ws.cur);
+  tutorSync();
   if(ws.cur){
     // the editor keeps its own DOM; only build it once per opened project
     if(!el.querySelector(".ws")) wsMountEditor(el);
@@ -291,7 +292,7 @@ function wsRun(manual){
   // the runner is another origin, so allow-same-origin gives it that origin (working localStorage/fetch), never ours
   f.setAttribute("sandbox","allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox");
   f.setAttribute("allow","clipboard-write");
-  f.src=RUN_ORIGIN+"/?v=19";
+  f.src=RUN_ORIGIN+"/?v=20";
   $("wsFrameWrap").appendChild(f); ws.frame=f;
   ws.stuckTimer=setTimeout(wsStuck,WS_STUCK_MS+2000);   // generous first timer covers loading the runner page
 }
@@ -342,6 +343,7 @@ function wsRenderLogs(){
       '<span class="ws-log-text">'+esc(x.text)+'</span>'+(x.line?'<button type="button" class="ws-line" data-act="ws-goto" data-file="'+x.file+'" data-line="'+x.line+'" title="Show this line">'+esc(wsFiles(ws.cur).find(([k])=>k===x.file)[1])+':'+x.line+'</button>':'')+'</li>').join("")
     :'<li class="ws-log-empty">'+(ws.runState==="loading"?(ws.frozenUntil>Date.now()?"Waiting for the frozen preview to shut down":"Running"):ws.runState==="stuck"?"Stopped. The page never finished loading.":ws.cur.kind==="sql"?"No errors. Results show in the preview.":"Nothing logged. Use console.log() in "+esc(wsJsName(ws.cur))+" to print here.")+'</li>';
   ol.scrollTop=ol.scrollHeight;
+  if(tutor.open&&!tutor.busy&&document.activeElement!==$("tutorQ")) tutorRender();   // keep "what it sees" current
 }
 // the companion notices errors and fixes, without nagging
 function wsReact(){
@@ -394,6 +396,7 @@ function wsAction(a, el){
     case "ws-file": if(ws.editor){ ws.editor.show(el.dataset.file); ws.cur.file=el.dataset.file; wsRenderBar(); } break;
     case "ws-run": wsRun(true); break;
     case "ws-tab": wsTab(); break;
+    case "ws-side": { const o=document.body.classList.toggle("ws-side-open"); try{ localStorage.setItem("hqSideOpen",o?"1":"0"); }catch(e){} tutorSync(); } break;
     case "ws-clear": ws.logs=[]; wsRenderLogs(); wsLed(); break;
     case "ws-console": { const c=$("wsConsole"), open=!c.classList.toggle("closed"); el.setAttribute("aria-expanded",String(open)); } break;
     case "ws-device": ws.device=el.dataset.device; try{ localStorage.setItem("hqWsDevice",ws.device); }catch(e){}
@@ -404,4 +407,133 @@ function wsAction(a, el){
     default: return false;
   }
   return true;
+}
+
+/* =========================================================
+   TUTOR: while a project is open, the student's creature floats over the Workshop.
+   Drag it anywhere; click it to ask about the code. It reads the quest, files and
+   console errors and answers with a clue in its own voice (tutor/ Worker), never the fix.
+   Asking again on the same problem gives a bigger clue (1 → 3).
+   ========================================================= */
+const TUTOR_URL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? "http://127.0.0.1:8787/hint"
+  : "";   // set to the deployed Worker's URL (https://creature-hq-tutor.<account>.workers.dev/hint) after `wrangler deploy`
+try{ if(localStorage.getItem("hqSideOpen")==="1") document.body.classList.add("ws-side-open"); }catch(e){}
+const tutor = { el:null, open:false, busy:false, level:0, levelFor:null, hadErrors:false, q:"", a:"", note:"", left:null, mirrorUntil:0 };
+
+function tutorSync(){
+  const want = !!(ws.cur && state.pet && view==="workshop");
+  // while coding, the creature card folds into a thin bar on the left (click it to open again)
+  document.body.classList.toggle("ws-coding", want);
+  const side=document.querySelector(".side");
+  if(side&&!side.querySelector(".side-rail")) side.insertAdjacentHTML("afterbegin",'<button type="button" class="side-rail" data-act="ws-side" aria-expanded="false"><span class="side-rail-ic" aria-hidden="true">›</span><span class="side-rail-txt"></span></button>');
+  const rail=side&&side.querySelector(".side-rail"), open=document.body.classList.contains("ws-side-open");
+  if(rail&&state.pet){ rail.querySelector(".side-rail-txt").textContent=(open?"Hide ":"")+(state.pet.nick||SPECIES[state.pet.species].forms[0]); rail.querySelector(".side-rail-ic").textContent=open?"‹":"›";
+    rail.setAttribute("aria-expanded",String(open)); rail.setAttribute("aria-label",(open?"Fold":"Open")+" the creature card"); }
+  if(!want){ if(tutor.el){ tutor.el.remove(); tutor.el=null; tutor.open=false; } return; }
+  if(!tutor.el) tutorMount();
+  if(tutor.levelFor!==ws.cur.id){ tutor.levelFor=ws.cur.id; tutor.level=0; tutor.q=tutor.a=tutor.note=""; }   // a new project starts at clue 1
+  tutorRender();
+}
+function tutorMount(){
+  const el=tutor.el=document.createElement("div");
+  el.className="tutor";
+  el.innerHTML='<div class="tutor-panel" id="tutorPanel" role="dialog" aria-label="Ask your creature" hidden></div>'+
+    '<div class="tutor-say" id="tutorSay" aria-live="polite" hidden></div>'+
+    '<button type="button" class="tutor-pet" id="tutorPet"></button>';
+  document.body.appendChild(el);
+  if(!tutor.watching){ tutor.watching=true; new MutationObserver(tutorMirror).observe($("bubble"),{childList:true,characterData:true,subtree:true}); }
+  let pos=null; try{ pos=JSON.parse(localStorage.getItem("hqTutorPos")); }catch(e){}
+  tutorPlace(pos&&Number.isFinite(pos.x)?pos.x:innerWidth-170, pos&&Number.isFinite(pos.y)?pos.y:innerHeight-420);   // starts over the preview, clear of the console
+  // drag anywhere; a press that barely moves is a click
+  const pet=el.querySelector(".tutor-pet");
+  pet.addEventListener("pointerdown",e=>{
+    if(e.button!==0) return;
+    const r=el.getBoundingClientRect(), dx=e.clientX-r.left, dy=e.clientY-r.top, x0=e.clientX, y0=e.clientY;
+    let moved=false;
+    pet.setPointerCapture(e.pointerId);
+    const move=ev=>{ if(!moved&&Math.hypot(ev.clientX-x0,ev.clientY-y0)<5) return; moved=true; el.classList.add("dragging"); tutorPlace(ev.clientX-dx,ev.clientY-dy); };
+    const up=()=>{ pet.removeEventListener("pointermove",move); pet.removeEventListener("pointerup",up); pet.removeEventListener("pointercancel",up);
+      el.classList.remove("dragging");
+      if(moved){ try{ localStorage.setItem("hqTutorPos",JSON.stringify({x:el.offsetLeft,y:el.offsetTop})); }catch(x){} tutorRender(); }
+      else tutorToggle(); };
+    pet.addEventListener("pointermove",move); pet.addEventListener("pointerup",up); pet.addEventListener("pointercancel",up);
+  });
+  pet.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); tutorToggle(); } });   // keyboard: Enter opens, no drag needed
+  addEventListener("resize",()=>{ if(tutor.el) tutorPlace(tutor.el.offsetLeft,tutor.el.offsetTop); });
+}
+function tutorPlace(x,y){
+  const el=tutor.el; if(!el) return;
+  el.style.left=Math.max(4,Math.min(innerWidth-112,x))+"px";
+  el.style.top=Math.max(4,Math.min(innerHeight-112,y))+"px";
+  el.classList.toggle("left-side",el.offsetLeft<380);        // the panel opens towards the middle of the screen
+  el.classList.toggle("low",el.offsetTop<330);
+}
+function tutorToggle(){
+  tutor.open=!tutor.open; tutorRender();
+  if(tutor.open){ const t=$("tutorQ"); if(t) t.focus(); }
+}
+// what the creature can see right now: quest, files and the errors in the console
+function tutorContext(){
+  const c=ws.cur, q=c.questId?questOf(c.questId):null;
+  const files={}; wsFiles(c).forEach(([k,name])=>{ files[name]=c.files[k]||""; });
+  const errors=ws.logs.filter(l=>l.level==="error").slice(0,5).map(l=>({text:l.text,line:l.line||0,file:l.line?wsFiles(c).find(([k])=>k===l.file)[1]:""}));
+  return { quest:q?{title:q.q,phase:phases[q.pi].short,stage:q.stage}:null, kind:c.kind, files, errors };
+}
+function tutorRender(){
+  const el=tutor.el; if(!el) return;
+  const sp=SPECIES[state.pet.species], name=state.pet.nick||sp.forms[0];
+  const pet=$("tutorPet");
+  if(pet.dataset.who!==state.pet.species+formFor(level())){ pet.dataset.who=state.pet.species+formFor(level()); pet.innerHTML=creatureSVG(state.pet.species,formFor(level()),"","aria-hidden=\"true\""); }
+  pet.setAttribute("aria-label",(tutor.open?"Close":"Ask "+name+" about your code")+" (drag to move)");
+  pet.setAttribute("aria-expanded",String(tutor.open));
+  const panel=$("tutorPanel"); panel.hidden=!tutor.open;
+  if(tutor.open){ $("tutorSay").hidden=true; clearTimeout(tutor.sayTimer); }   // the question box replaces any passing remark
+  if(!tutor.open) return;
+  const ctx=tutorContext(), files=Object.keys(ctx.files).filter(n=>ctx.files[n].trim());
+  const errs=ctx.errors;
+  const tags=(ctx.quest?'<span>Quest: '+esc(ctx.quest.title)+'</span>':'<span>No quest</span>')+files.map(n=>'<span>'+esc(n)+'</span>').join("")+
+    (errs.length?'<span class="err">⚠ '+esc(errs[0].file&&errs[0].line?errs[0].file+":"+errs[0].line+" ":"")+esc(errs[0].text.split(":")[0].slice(0,24))+(errs.length>1?" +"+(errs.length-1):"")+'</span>':'');
+  const typed=$("tutorQ")?$("tutorQ").value:"";   // a re-draw keeps what they were typing
+  const clue=tutor.level?'clue '+tutor.level+' of 3':'ask me anything';
+  panel.innerHTML='<div class="tutor-head"><b>'+esc(name.toUpperCase())+'</b><span>'+clue+'</span></div>'+
+    '<div class="tutor-sees" aria-label="What '+esc(name)+' can see">'+tags+'</div>'+
+    (tutor.q?'<p class="tutor-q">'+esc(tutor.q)+'</p>':'')+
+    (tutor.busy?'<p class="tutor-a thinking">'+esc(name)+' is reading your code…</p>':tutor.a?'<p class="tutor-a">'+tutorFormat(tutor.a)+'</p>':'')+
+    (tutor.note?'<p class="tutor-note">'+esc(tutor.note)+'</p>':'')+
+    '<form class="tutor-ask"><textarea id="tutorQ" rows="2" maxlength="500" placeholder="'+(tutor.a?'Still stuck? Ask again for a bigger clue':'What are you stuck on?')+'" aria-label="Your question"'+(tutor.busy?" disabled":"")+'></textarea>'+
+    '<button type="submit" class="btn btn-sm btn-primary"'+(tutor.busy?" disabled":"")+'>Ask</button></form>'+
+    (tutor.left!=null?'<p class="tutor-left">'+plural(tutor.left,"question")+' left today</p>':'');
+  const f=panel.querySelector("form"), t=$("tutorQ");
+  if(typed&&!tutor.busy) t.value=typed;
+  f.addEventListener("submit",e=>{ e.preventDefault(); tutorAsk(t.value); });
+  t.addEventListener("keydown",e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); tutorAsk(t.value); } else if(e.key==="Escape"){ tutorToggle(); $("tutorPet").focus(); } });
+}
+// `names` in answers become inline code; everything else is text
+const tutorFormat = s => esc(s).replace(/`([^`]{1,60})`/g,"<code>$1</code>");
+async function tutorAsk(text){
+  const question=String(text||"").trim(); if(!question||tutor.busy) return;
+  if(!TUTOR_URL){ tutor.note="I'm not switched on yet. Ask whoever runs Creature HQ."; tutorRender(); return; }
+  const ctx=tutorContext();
+  // a bigger clue each time, until the errors go away (the problem changed) or another project opens
+  if(tutor.hadErrors&&!ctx.errors.length) tutor.level=0;
+  tutor.level=Math.min(3,tutor.level+1); tutor.hadErrors=ctx.errors.length>0;
+  tutor.q=question; tutor.a=""; tutor.note=""; tutor.busy=true; $("tutorQ").value=""; tutorRender();
+  const sorry={ auth:"sign in so i can read your code with you.", limit:"i'm out of brain juice for today. back tomorrow!", busy:"my brain is overloaded right now. try again in a minute?" };
+  try{
+    const token=await HQSync.idToken();
+    const r=await fetch(TUTOR_URL,{ method:"POST", headers:{"content-type":"application/json",...(token?{authorization:"Bearer "+token}:{})},
+      body:JSON.stringify({ question, level:tutor.level, species:state.pet.species, ...ctx }) });
+    const out=await r.json().catch(()=>({}));
+    if(r.ok&&out.answer){ tutor.a=out.answer; tutor.left=out.left; sfx.coin&&sfx.coin(); }
+    else{ tutor.level=Math.max(0,tutor.level-1); tutor.note=sorry[out.code]||"something went wrong. try again?"; if(out.code==="limit") tutor.left=0; }
+  }catch(e){ tutor.level=Math.max(0,tutor.level-1); tutor.note="can't reach my brain. check your connection?"; }
+  tutor.busy=false; tutorRender();
+  const t=$("tutorQ"); if(t) t.focus();
+}
+// with the card folded away, what the creature says (error quips, cheers) shows over the floating one for a moment
+function tutorMirror(){
+  if(!tutor.el||tutor.open||document.body.classList.contains("ws-side-open")) return;
+  const say=$("tutorSay"), text=$("bubble").textContent.trim(); if(!say||!text) return;
+  say.textContent=text; say.hidden=false; clearTimeout(tutor.sayTimer);
+  tutor.sayTimer=setTimeout(()=>{ say.hidden=true; },5000);
 }

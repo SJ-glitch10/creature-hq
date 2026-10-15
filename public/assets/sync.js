@@ -15,10 +15,10 @@ import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp, Timestamp, connectFirestoreEmulator,
   collection, getDocs, query, orderBy, limit
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
-import { firebaseConfig } from "./firebase-config.js?v=19";
+import { firebaseConfig } from "./firebase-config.js?v=20";
 
 // workshop.js before game.js: the game draws its first screen as soon as it loads
-const GAME_SCRIPTS = ["/assets/quiz.js?v=19", "/assets/workshop.js?v=19", "/assets/game.js?v=19"];
+const GAME_SCRIPTS = ["/assets/quiz.js?v=20", "/assets/workshop.js?v=20", "/assets/game.js?v=20"];
 const MAX_SAVE_CHARS = 900000;          // Firestore documents top out at 1 MiB
 const WRITE_DELAY = 1500;
 
@@ -105,7 +105,7 @@ function localProjects(){
 const configured = !!(firebaseConfig.apiKey && firebaseConfig.projectId);
 if(!configured){
   if(/^(localhost|127\.0\.0\.1)$/.test(location.hostname)){
-    window.HQSync = { local:true, user:{email:"Local test mode", name:"", provider:"local", verified:true},
+    window.HQSync = { local:true, user:{email:"Local test mode", name:"", provider:"local", verified:true}, idToken:async()=>"",
       changed(){}, lastSaved:0, async signOut(){ clearLocal(); location.href="/"; return {ok:true}; },
       async deleteAccount(){ clearLocal(); location.href="/"; return {ok:true}; },
       projects: localProjects() };
@@ -175,6 +175,7 @@ function start(){
       user:{ email:user.email||"", name:user.displayName||"", verified:user.emailVerified,
              provider:(user.providerData[0]&&user.providerData[0].providerId)||"password" },
       changed, flush:writeNow, lastSaved:0,
+      idToken:()=>user.getIdToken(),   // proves who is asking, e.g. to the tutor
       signOut:signOutFlow, deleteAccount,
       projects: cloudProjects(user.uid)
     };

@@ -1,0 +1,16 @@
+# Creature HQ tutor (Cloudflare Workers free plan). Deploy: cd tutor && npx wrangler deploy
+name = "creature-hq-tutor"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[ai]
+binding = "AI"
+
+# per-student daily question counter; create once with `npx wrangler kv namespace create LIMITS` and paste the id here
+[[kv_namespaces]]
+binding = "LIMITS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+FIREBASE_PROJECT_ID = "creature-hq"
+# local `wrangler dev` sets ALLOW_NO_AUTH=1 in .dev.vars so local test mode (no sign-in) can ask questions

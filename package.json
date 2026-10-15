@@ -7,7 +7,7 @@
     "build:site": "node tools/build-site.mjs",
     "build:app": "node tools/build-app.mjs",
     "check:quiz": "node tools/checkquiz.mjs",
-    "test": "node tools/checkquiz.mjs && node tools/test-workshop.mjs",
+    "test": "node tools/checkquiz.mjs && node tutor/test.mjs && node tools/test-workshop.mjs",
     "test:rules": "npx -y firebase-tools emulators:exec --only firestore --project demo-creature-hq \"node tools/test-rules.mjs\""
   },
   "devDependencies": {

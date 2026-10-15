@@ -6,7 +6,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const SITE = (process.env.SITE || "https://creature-hq.web.app").replace(/\/$/, "");
-const V = "19";
+const V = "20";
 const game = fs.readFileSync("public/assets/game.js", "utf8").replace(/\r\n/g, "\n");
 const cut = (from, to) => { const a = game.indexOf(from), b = game.indexOf(to, a); if (a < 0 || b < 0) throw new Error("marker " + from); return game.slice(a, b); };
 
@@ -187,6 +187,8 @@ ${header}
   <p>Your game save is stored in Google Cloud Firestore under your account: quest progress, quiz answers, notes, project submissions (including the links and write-ups you enter), trophies, your companion, and the code you write in the Workshop.</p>
   <h2>Why</h2>
   <p>Only to run Creature HQ: to sign you in and to load your progress on any device. We don't sell your data, show ads, or share it with anyone except the providers that host the service.</p>
+  <h2>Asking your creature</h2>
+  <p>When you ask your creature a question in the Workshop, your question, the quest, the files of the project you have open and its console errors are sent to our helper on Cloudflare Workers, which uses Cloudflare Workers AI to write the answer. We don't keep your question or code. We only count how many questions your account asked today, and that count is deleted after two days. Cloudflare doesn't use them to train AI models.</p>
   <h2>On your device</h2>
   <p>The app keeps a copy of your save and your theme preference in your browser's local storage so it loads quickly and works briefly offline. Firebase also stores a sign-in token in your browser.</p>
   <h2>Deleting your data</h2>

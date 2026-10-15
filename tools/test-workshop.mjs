@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { chromium } from "playwright-core";
+import tutorWorker from "../tutor/src/index.js";
 
 const TYPES = { ".html":"text/html", ".js":"text/javascript", ".mjs":"text/javascript", ".css":"text/css", ".svg":"image/svg+xml", ".png":"image/png", ".json":"application/json", ".webmanifest":"application/manifest+json" };
 const HARNESS = `<!DOCTYPE html><body><script>
@@ -46,8 +47,24 @@ const servers = [
     "/assets/firebase-config.js": ["text/javascript", fs.readFileSync(path.join(ROOT, "tools/blank-config.js"))],
     "/__harness": ["text/html", HARNESS]
   }),
-  await serve(path.join(ROOT, "public-run"), "localhost", 5174)
+  await serve(path.join(ROOT, "public-run"), "localhost", 5174),
+  await tutorServer()
 ];
+// the real tutor Worker on 127.0.0.1:8787 (where the app looks locally), with a stand-in AI that echoes the clue level
+function tutorServer(){
+  const kv = new Map(), env = { ALLOW_NO_AUTH: "1", FIREBASE_PROJECT_ID: "creature-hq", tutorAsked: [],
+    LIMITS: { get: async k => kv.get(k) ?? null, put: async (k, v) => { kv.set(k, v); } },
+    AI: { run: async (m, input) => { const level = (/CLUE LEVEL (\d)/.exec(input.messages[0].content) || [])[1];
+      env.tutorAsked.push(input.messages[1].content); return { response: "clue " + level + ": look at `#changeBtn` on line 3." }; } } };
+  tutorServer.env = env;
+  const server = http.createServer(async (req, res) => {
+    const body = await new Promise(r => { let b = ""; req.on("data", c => b += c); req.on("end", () => r(b)); });
+    const r = await tutorWorker.fetch(new Request("http://127.0.0.1:8787" + req.url, { method: req.method, headers: req.headers,
+      body: ["GET", "HEAD", "OPTIONS"].includes(req.method) ? undefined : body }), env);
+    res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(await r.text());
+  });
+  return new Promise(r => server.listen(8787, "127.0.0.1", () => r(server)));
+}
 const browser = await chromium.launch({ channel: "chrome", headless: true });
 let failed = 0;
 async function test(name, fn){
@@ -499,6 +516,63 @@ await test("after a frozen run, the next run recovers on its own", async () => {
   assert.match(await W(() => document.getElementById("wsLogs").textContent), /Waiting for the frozen preview to shut down/);
   await app.waitForFunction(() => ws.runState === "ok" && ws.logs.some(l => l.text === "back"), null, { timeout: 60000 });
   await W(() => wsBack());
+});
+await test("tutor: no creature yet, no floating creature", async () => {
+  await W(() => wsQuest("3-1-0"));
+  await app.waitForFunction(() => ws.cur && ws.cur.questId === "3-1-0");
+  assert.equal(await W(() => !!state.pet), false);
+  assert.equal(await app.locator(".tutor").count(), 0);
+  await W(() => { state.pet = cleanPet({ species: "goblin" }); wsBack(); });   // the student picks a creature
+});
+await test("tutor: while coding the card folds and the creature floats; click to ask, bigger clue each time", async () => {
+  await W(() => wsQuest("3-1-0"));
+  await app.waitForFunction(() => ws.cur && ws.cur.questId === "3-1-0" && ws.editor && ws.frame, null, { timeout: 20000 });
+  await W(() => { ws.cur.files.html = '<button id="change-btn">Go</button>\n<script src="script.js"></script>';
+    ws.cur.files.js = 'const b = document.querySelector("#changeBtn");\nb.addEventListener("click", () => {});\n'; wsRun(true); });
+  await app.waitForFunction(() => ws.runState === "ok" && ws.logs.some(l => l.level === "error"));
+  assert.equal(await W(() => getComputedStyle(document.querySelector(".shell")).gridTemplateColumns.split(" ")[0]), "44px");
+  assert.equal(await W(() => getComputedStyle(document.querySelector(".brand")).display), "none");
+  // a press that barely moves is a click: the question box opens and shows what the creature sees
+  const box = await app.locator("#tutorPet").boundingBox();
+  await app.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await app.waitForSelector("#tutorQ");
+  assert.match(await app.textContent(".tutor-sees"), /Quest: Make a button change text[\s\S]*index\.html[\s\S]*script\.js[\s\S]*script\.js:2 TypeError/);
+  for(const n of [1, 2, 3, 3]){
+    await app.fill("#tutorQ", "why does my button do nothing?"); await app.press("#tutorQ", "Enter");
+    await app.waitForFunction(n => !tutor.busy && tutor.a === "clue " + n + ": look at `#changeBtn` on line 3.", n);
+  }
+  assert.equal(await app.textContent(".tutor-a"), "clue 3: look at #changeBtn on line 3.");
+  assert.equal(await app.textContent(".tutor-a code"), "#changeBtn");
+  assert.match(await app.textContent(".tutor-left"), /6 questions left today/);
+  const sent = tutorServer.env.tutorAsked.at(-1);
+  assert.match(sent, /FILE script\.js \(with line numbers\):\n  1\| const b = document\.querySelector\("#changeBtn"\);/);
+  assert.match(sent, /TypeError: Cannot read properties of null \(reading 'addEventListener'\) \(script\.js:2\)/);
+  // fixing the error and asking again starts from clue 1
+  await W(() => { ws.cur.files.js = 'const b = document.querySelector("#change-btn");\nb.addEventListener("click", () => {});\n'; wsRun(true); });
+  await app.waitForFunction(() => ws.runState === "ok" && !ws.logs.some(l => l.level === "error"));
+  await app.fill("#tutorQ", "how do I change the text?"); await app.press("#tutorQ", "Enter");
+  await app.waitForFunction(() => !tutor.busy && /^clue 1/.test(tutor.a));
+});
+await test("tutor: drag moves it and remembers where; out of questions is said kindly; leaving the Workshop puts everything back", async () => {
+  await W(() => { tutor.open = false; tutorRender(); });
+  const b = await app.locator("#tutorPet").boundingBox();
+  await app.mouse.move(b.x + 50, b.y + 50); await app.mouse.down();
+  await app.mouse.move(b.x - 100, b.y - 100, { steps: 6 }); await app.mouse.move(b.x - 250, b.y - 200, { steps: 6 }); await app.mouse.up();
+  assert.equal(await W(() => tutor.open), false, "a drag isn't a click");
+  const pos = await W(() => JSON.parse(localStorage.getItem("hqTutorPos")));
+  assert.ok(Math.abs(pos.x - (b.x - 300)) < 3 && Math.abs(pos.y - (b.y - 250)) < 3, JSON.stringify(pos));
+  await W(() => { tutor.open = true; tutorRender(); });
+  for(let i = 0; i < 6; i++){ await app.fill("#tutorQ", "q" + i); await app.press("#tutorQ", "Enter"); await app.waitForFunction(() => !tutor.busy); }
+  assert.match(await app.textContent(".tutor-note"), /out of brain juice for today/);
+  assert.match(await app.textContent(".tutor-left"), /0 questions left today/);
+  await app.locator(".side-rail").click();
+  assert.equal(await W(() => getComputedStyle(document.querySelector(".shell")).gridTemplateColumns.split(" ")[0]), "320px");
+  await app.locator(".side-rail").click();
+  await W(() => go("roadmap"));
+  assert.equal(await app.locator(".tutor").count(), 0);
+  assert.equal(await W(() => document.body.classList.contains("ws-coding")), false);
+  await W(() => go("workshop")); await W(() => wsBack());
+  assert.equal(await app.locator(".tutor").count(), 0, "no floating creature on the project list");
 });
 await test("no uncaught errors in the app page", async () => {
   assert.deepEqual(await W(() => window.__errs || []), []);

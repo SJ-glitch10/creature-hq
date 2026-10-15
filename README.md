@@ -61,6 +61,49 @@ A browser can't run Node, so the runner provides small stand-ins for what the No
 
 **Endless loops:** when a run never finishes loading, the Workshop removes the preview, pauses auto-run and says so. The loop still keeps the runner site's browser process busy, and Chrome only frees it some seconds after the last runner frame is gone. A new frame made before then joins the busy process and never loads. So for 10 s after a frozen run (`WS_FROZEN_MS`) the Workshop doesn't create a runner frame, and the console says it's waiting. If the runner page still doesn't load, that isn't the student's code: the Workshop waits and retries up to twice (`WS_LOAD_RETRIES`) before reporting it. In Chrome (2026-10-15) the next run came back about 10 s after an endless JS loop and about 26 s after an endless SQL query.
 
+## The tutor (ask your creature)
+
+While a Workshop project is open:
+- the creature card on the left folds into a thin bar (click it to open again; the choice is remembered);
+- the student's creature floats over the screen and can be dragged anywhere (its position is remembered);
+- clicking the creature (or pressing Enter on it) opens a question box.
+
+The box shows what the creature can see: the quest, the project's files and the console errors. The creature answers in its own voice (`VOICES` in `tutor/src/index.js`, written from `SPECIES` in `game.js`) with a **clue, never the solution**, the way CS50's rubber duck does:
+
+| Ask | Clue |
+|---|---|
+| 1st | A nudge: points at the area or the error and asks a guiding question |
+| 2nd | The concept they're missing, with a different tiny example |
+| 3rd and later | The exact line and what's wrong with it, in words. Still no corrected code. |
+
+The clues start again at level 1 when the errors go away (the problem changed) or another project opens. While the card is folded, the creature's usual remarks show next to the floating creature instead.
+
+**How it works.** `workshop.js` (the TUTOR section) sends the question, the clue level, the species, the quest, the files and the errors to the tutor Worker, along with the student's Firebase ID token. The Worker is in `tutor/` and runs on the Cloudflare Workers free plan. It:
+1. checks the token against Google's keys (`aud`/`iss` must be the `creature-hq` project);
+2. allows each student 10 questions per UTC day, counted in KV and deleted after 48 h;
+3. cuts the files to 12,000 characters, numbers their lines and marks them as data, not instructions;
+4. asks `@cf/openai/gpt-oss-120b` on Workers AI for an answer of 1–3 sentences;
+5. removes any code block from the answer before returning it.
+
+Prompts aren't stored, and Cloudflare doesn't train on them (see the privacy page).
+
+**Cost and limits.** The Workers free plan includes 100,000 requests/day, and Workers AI includes 10,000 neurons/day. One question is about 2,500 tokens in and up to a few hundred out, roughly 80–100 neurons, so the free allowance covers **about 100 questions a day across all students**. When it runs out, Workers AI refuses and the creature says its brain is overloaded. For more, either switch to a smaller model in `MODEL` (`@cf/openai/gpt-oss-20b` uses about half the neurons but gives weaker clues), or move to the $5/month Workers Paid plan, which charges $0.011 per 1,000 neurons beyond the free allowance.
+
+**Run it locally.** `tutor/.dev.vars` sets `ALLOW_NO_AUTH=1`, so local test mode (no sign-in) can ask questions.
+```bash
+cd tutor && npx wrangler login     # once; Workers AI needs a Cloudflare account even locally
+npx wrangler dev --port 8787       # the app on 127.0.0.1:5173 calls http://127.0.0.1:8787/hint
+```
+
+**Deploy (once).**
+1. `cd tutor && npx wrangler kv namespace create LIMITS`, then paste the printed id into `wrangler.toml`.
+2. `npx wrangler deploy`, and note the printed `https://creature-hq-tutor.<account>.workers.dev` URL.
+3. Set `TUTOR_URL` in `public/assets/workshop.js` to that URL plus `/hint`, bump the asset version, and deploy hosting.
+
+Until `TUTOR_URL` is set, the live site's creature says it isn't switched on yet.
+
+**Tests.** `node tutor/test.mjs` tests the Worker with a fake AI and real signed tokens. `npm test` runs it, plus the in-app tutor flow against the real Worker code with a stand-in AI.
+
 ## How saving works
 
 The game still reads and writes its own localStorage keys. `sync.js`:
