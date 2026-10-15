@@ -1,0 +1,46 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the version check diffs against the PR's base
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Quiz bank
+        run: npm run check:quiz
+      - name: Asset version
+        run: node tools/check-version.mjs ${{ github.event.pull_request.base.sha }}
+      - name: Editor bundle matches tools/editor-entry.js
+        run: |
+          npm run build:editor
+          git diff --exit-code --stat public/assets/editor.js || { echo "::error::public/assets/editor.js is stale. Run npm run build:editor and commit it."; exit 1; }
+      # Workshop runner/app tests drive the Chrome that ships on GitHub's Ubuntu runners
+      - name: Workshop tests
+        run: npm test --if-present
+
+  rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4   # the Firestore emulator needs Java
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - name: firestore.rules
+        run: if [ -f tools/test-rules.mjs ]; then npm run test:rules; else echo "no rules tests on this branch"; fi

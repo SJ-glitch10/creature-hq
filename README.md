@@ -70,6 +70,15 @@ The game still reads and writes its own localStorage keys. `sync.js`:
 3. Keeps a revision number. If this device has changes the server never got (closed while offline), they're pushed on the next load; if another device saved something newer, that wins.
 4. If another tab or device saves while this one is open, this tab stops saving and asks you to reload, so older progress never overwrites newer progress.
 
+## Continuous integration
+
+`.github/workflows/test.yml` runs on every pull request and on pushes to `main`:
+
+- `npm run check:quiz`: the quiz bank.
+- `node tools/check-version.mjs <base>`: every `?v=` stamp matches `const V` in `tools/build-app.mjs` and `tools/build-site.mjs`. If a PR changes `public/assets` or `public-run` without bumping `V`, the check fails, because returning players would otherwise keep cached old files. Run `node tools/check-version.mjs origin/main` locally before pushing.
+- `public/assets/editor.js` must match a fresh `npm run build:editor`.
+- `npm test` (Workshop runner and app tests in the Chrome on GitHub's Ubuntu runners) and `npm run test:rules` (Firestore emulator), on branches that have them.
+
 ## Commands
 
 ```bash
