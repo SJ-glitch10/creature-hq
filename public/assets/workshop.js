@@ -24,12 +24,15 @@ const wsFiles = p => WS_KINDS[wsKind(p)].files;
 const wsJsName = p => wsFiles(p).find(([k])=>k==="js")[1];
 const WS_MAX = 100000;                 // characters per file (matches firestore.rules)
 const WS_SAVE_IDLE = 2000, WS_SAVE_MAX = 10000, WS_RUN_DELAY = 700, WS_STUCK_MS = 3500;
+// A frozen preview keeps the runner site's browser process busy after its iframe is removed, and a new iframe made
+// in the meantime joins that process and never loads. Chrome frees it a few seconds after the last frame is gone.
+const WS_FROZEN_MS = 10000, WS_LOAD_RETRIES = 2;
 // quests you can build in the browser: HTML, CSS, JavaScript, API and React practice and project stages, Node/Express and the SQL practice quests
 const wsQuestOk = (pi,si,qi) => (pi>=1 && pi<=5 && ["Tiny Wins","Project","Projects"].includes(phases[pi].stages[si][0])) || ["node","sql"].includes(wsKindOfQuest(pi,si,qi));
 
 const ws = { list:null, loading:false, error:"", cur:null, editor:null, editorLoading:null,
   dirty:false, saving:false, saveIdle:null, saveMax:null, lastSaveErr:false,
-  runId:0, runTimer:null, stuckTimer:null, frame:null, tabWin:null, paused:false, auto:true,
+  runId:0, runTimer:null, stuckTimer:null, frame:null, readyRun:-1, frozenUntil:0, loadRetries:0, tabWin:null, paused:false, auto:true,
   logs:[], runState:"idle", device:"full", mobilePane:"code", lastErrCount:0, lastQuip:0 };
 try{ ws.auto = localStorage.getItem("hqWsAuto")!=="0"; ws.device = localStorage.getItem("hqWsDevice")||"full"; }catch(e){}
 
@@ -280,6 +283,9 @@ function wsRun(manual){
   wsKillFrame();
   ws.runId++; ws.logs=[]; ws.runState="loading"; wsRenderLogs(); wsLed();
   $("wsStuck").hidden=true;
+  // no runner frame at all until the frozen one's process is gone, or the new one would join it
+  const wait=ws.frozenUntil-Date.now();
+  if(wait>0){ ws.runTimer=setTimeout(()=>wsRun(true),wait); return; }
   const f=document.createElement("iframe");
   f.title="Preview of "+ws.cur.name;
   // the runner is another origin, so allow-same-origin gives it that origin (working localStorage/fetch), never ours
@@ -295,6 +301,10 @@ function wsSend(win){
 }
 function wsStuck(){
   if(!ws.cur||ws.runState!=="loading") return;
+  ws.frozenUntil=Date.now()+WS_FROZEN_MS;
+  // the runner page never said hello: not the student's code, most likely an earlier frozen preview. Wait it out and retry.
+  if(ws.readyRun!==ws.runId&&ws.loadRetries<WS_LOAD_RETRIES){ ws.loadRetries++; return wsRun(true); }
+  ws.loadRetries=0;
   ws.runState="stuck"; ws.paused=true; wsKillFrame(); wsLed(); wsRenderLogs();
   const s=$("wsStuck"); if(s) s.hidden=false;
   if(state.pet) wsQuip("my screen froze. endless loop? check your while and for conditions.",true);
@@ -303,7 +313,7 @@ addEventListener("message",e=>{
   if(e.origin!==RUN_ORIGIN) return;
   const m=e.data||{};
   if(m.type==="hq-ready"){
-    if(ws.frame&&e.source===ws.frame.contentWindow){ wsSend(e.source); clearTimeout(ws.stuckTimer); ws.stuckTimer=setTimeout(wsStuck,WS_STUCK_MS); }
+    if(ws.frame&&e.source===ws.frame.contentWindow){ ws.readyRun=ws.runId; ws.loadRetries=0; wsSend(e.source); clearTimeout(ws.stuckTimer); ws.stuckTimer=setTimeout(wsStuck,WS_STUCK_MS); }
     else if(ws.tabWin&&e.source===ws.tabWin){ wsSend(ws.tabWin); ws.tabWin=null; }
     return;
   }
@@ -330,7 +340,7 @@ function wsRenderLogs(){
   $("wsCounts").innerHTML=(errs?'<span class="c-err">'+errs+'</span>':'')+(warns?'<span class="c-warn">'+warns+'</span>':'');
   ol.innerHTML=ws.logs.length?ws.logs.map(x=>'<li class="lv-'+x.level+'">'+(x.level==="error"?ic("warn"):x.level==="warn"?ic("warn"):'<span class="ws-caret" aria-hidden="true">›</span>')+
       '<span class="ws-log-text">'+esc(x.text)+'</span>'+(x.line?'<button type="button" class="ws-line" data-act="ws-goto" data-file="'+x.file+'" data-line="'+x.line+'" title="Show this line">'+esc(wsFiles(ws.cur).find(([k])=>k===x.file)[1])+':'+x.line+'</button>':'')+'</li>').join("")
-    :'<li class="ws-log-empty">'+(ws.runState==="loading"?"Running":ws.runState==="stuck"?"Stopped. The page never finished loading.":ws.cur.kind==="sql"?"No errors. Results show in the preview.":"Nothing logged. Use console.log() in "+esc(wsJsName(ws.cur))+" to print here.")+'</li>';
+    :'<li class="ws-log-empty">'+(ws.runState==="loading"?(ws.frozenUntil>Date.now()?"Waiting for the frozen preview to shut down":"Running"):ws.runState==="stuck"?"Stopped. The page never finished loading.":ws.cur.kind==="sql"?"No errors. Results show in the preview.":"Nothing logged. Use console.log() in "+esc(wsJsName(ws.cur))+" to print here.")+'</li>';
   ol.scrollTop=ol.scrollHeight;
 }
 // the companion notices errors and fixes, without nagging

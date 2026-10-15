@@ -491,6 +491,15 @@ await test("SQL: a query that never finishes is reported as stuck", async () => 
   assert.equal(await W(() => document.getElementById("wsStuck").hidden), false);
   await W(() => wsBack());
 });
+await test("after a frozen run, the next run recovers on its own", async () => {
+  await W(() => wsCreate(WS_TEMPLATES.blank));
+  await W(() => { ws.cur.files.js = "while (true) {}"; wsRun(true); });
+  await app.waitForFunction(() => ws.runState === "stuck", null, { timeout: 30000 });
+  await W(() => { ws.cur.files.js = "console.log('back')"; wsRun(true); });   // straight away, like a quick fix
+  assert.match(await W(() => document.getElementById("wsLogs").textContent), /Waiting for the frozen preview to shut down/);
+  await app.waitForFunction(() => ws.runState === "ok" && ws.logs.some(l => l.text === "back"), null, { timeout: 60000 });
+  await W(() => wsBack());
+});
 await test("no uncaught errors in the app page", async () => {
   assert.deepEqual(await W(() => window.__errs || []), []);
 });

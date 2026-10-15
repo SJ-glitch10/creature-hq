@@ -59,7 +59,7 @@ A browser can't run Node, so the runner provides small stand-ins for what the No
 - Once a server calls `listen()`, the preview shows a request panel (method, path, JSON body). The first request goes to the app's first plain GET route, or `/`. The last request is saved per project in the runner's `localStorage` and replayed on every run, so a code change shows its new response straight away. A request with no answer after 5 seconds is reported. HTML responses render in a sandboxed frame with scripts disabled.
 - Server state lives in memory and starts fresh on every run. Real npm packages, databases and the file system aren't available.
 
-**Known issue:** after an endless loop, the Workshop marks the run as stuck and removes the preview, but the loop keeps the runner site's browser process busy. Any kind can hit this (`while (true)`, or a SQL query that never ends). The next run then reports stuck too. Seen in Chrome on 2026-10-14 and not yet fixed.
+**Endless loops:** when a run never finishes loading, the Workshop removes the preview, pauses auto-run and says so. The loop still keeps the runner site's browser process busy, and Chrome only frees it some seconds after the last runner frame is gone. A new frame made before then joins the busy process and never loads. So for 10 s after a frozen run (`WS_FROZEN_MS`) the Workshop doesn't create a runner frame, and the console says it's waiting. If the runner page still doesn't load, that isn't the student's code: the Workshop waits and retries up to twice (`WS_LOAD_RETRIES`) before reporting it. In Chrome (2026-10-15) the next run came back about 10 s after an endless JS loop and about 26 s after an endless SQL query.
 
 ## How saving works
 
