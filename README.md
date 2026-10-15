@@ -99,3 +99,10 @@ Bump `?v=14` in `tools/build-app.mjs`, `tools/build-site.mjs` and `sync.js` when
 - Typing ↑↑↑↓↓←→←→BA (an extra ↑) didn't trigger the cheat code.
 - Notes typed right before closing the tab on mobile could be lost (`pagehide` now flushes them).
 - Export didn't include sound and focus-length settings; import now restores them.
+
+## Tests
+
+```bash
+npm test             # quiz bank check + Workshop runner/app tests in your installed Chrome (local test mode, no cloud)
+npm run test:rules   # firestore.rules checks against the Firestore emulator (needs Java)
+```

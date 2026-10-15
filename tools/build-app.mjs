@@ -1,7 +1,7 @@
 // Builds public/app.html from the original body markup.
 import fs from "node:fs";
 const body = fs.readFileSync("tools/body.html","utf8");
-const V = "16";
+const V = "17";
 const html = `<!DOCTYPE html>
 <html lang="en">
 <head>

@@ -25,7 +25,8 @@ service cloud.firestore {
         function validProject() {
           let d = request.resource.data;
           return pid.size() <= 40
-            && d.keys().hasOnly(['name', 'files', 'questId', 'createdAt', 'updatedAt'])
+            && d.keys().hasOnly(['name', 'files', 'questId', 'kind', 'createdAt', 'updatedAt'])
+            && d.get('kind', 'web') in ['web', 'react']
             && d.name is string && d.name.size() >= 1 && d.name.size() <= 60
             && (d.questId == null || (d.questId is string && d.questId.size() <= 16))
             && d.files is map && d.files.keys().hasOnly(['html', 'css', 'js'])

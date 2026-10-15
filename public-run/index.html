@@ -23,14 +23,50 @@
     var m = e.data || {};
     if(m.type !== "hq-run") return;
     if(window.opener) window.opener = null;   // a preview tab can't redirect the app tab
-    var built = build(String(m.html||""), String(m.css||""), String(m.js||""), e.origin, m.runId);
-    document.open(); document.write(built); document.close();
+    var kind = KINDS[m.kind] ? m.kind : "web", origin = e.origin;
+    var go = function(){
+      var built = build(String(m.html||""), String(m.css||""), String(m.js||""), origin, m.runId, kind);
+      host.postMessage({type:"hq-wait", runId:m.runId, ms:3500}, origin);   // libraries are in; back to the normal stuck timer
+      document.open(); document.write(built); document.close();
+    };
+    if(KINDS[kind].compiler && !window.Babel){
+      host.postMessage({type:"hq-wait", runId:m.runId, ms:30000}, origin);
+      var s = document.createElement("script");
+      s.src = KINDS[kind].compiler; s.onload = go; s.onerror = go;   // without Babel, compile() reports the failure
+      document.head.appendChild(s);
+    }else go();
   });
+
+  // what each project kind does with script.js; versions are pinned so a student's project keeps working
+  var NPM = "https://cdn.jsdelivr.net/npm/";
+  var KINDS = {
+    web:   { js:"script.js" },
+    react: { js:"App.jsx", compiler: NPM + "@babel/standalone@7.29.10/babel.min.js",
+      // development builds: their warnings (missing keys, bad hooks) are part of learning React
+      libs: [NPM + "react@18.3.1/umd/react.development.js", NPM + "react-dom@18.3.1/umd/react-dom.development.js"],
+      router: [NPM + "@remix-run/router@1.23.2/dist/router.umd.min.js", NPM + "react-router@6.30.6/dist/umd/react-router.development.js",
+        NPM + "react-router-dom@6.30.6/dist/umd/react-router-dom.development.js"] }
+  };
+  // import/require inside App.jsx. Kept on one line so it doesn't shift line numbers.
+  var REQUIRE = "var exports={},module={exports:exports};function require(n){var m={'react':window.React,'react-dom':window.ReactDOM,'react-dom/client':window.ReactDOM," +
+    "'react-router-dom':window.ReactRouterDOM,'react-router':window.ReactRouter}[n];if(m)return m;if(/\\.css$/.test(n))return{};" +
+    "throw new Error(\"Can't import '\"+n+\"'. In the Workshop you can import react, react-dom/client and react-router-dom.\")}";
+
+  // JSX + import/export -> plain script, keeping every line where it was so errors point at the right line
+  function compile(src){
+    if(!window.Babel) return "throw new Error(\"Couldn't load the React compiler. Check your connection, then press Run.\");";
+    try{
+      return REQUIRE + Babel.transform(src, {presets:["react"], plugins:["transform-modules-commonjs"], retainLines:true, sourceType:"module", filename:"App.jsx"}).code;
+    }catch(err){
+      var line = err.loc && err.loc.line || 1, msg = String(err.message||err).replace(/^.*?: /, "").split("\n")[0];
+      return new Array(line).join("\n") + "throw new SyntaxError(" + JSON.stringify(msg) + ");";
+    }
+  }
 
   function esc(s, tag){ return s.replace(new RegExp("</" + tag, "gi"), "<\\/" + tag); }
 
   // Reports console output and errors to the Workshop. Kept on one line so it doesn't shift line numbers.
-  function shim(origin, runId){
+  function shim(origin, runId, file){
     var code = "(function(){var P=parent!==window?parent:null,O=" + JSON.stringify(origin) + ",R=" + JSON.stringify(runId) + ";" +
       "function ser(v,d){d=d||0;try{if(v===null)return'null';if(v===undefined)return'undefined';var t=typeof v;" +
       "if(t==='string')return d?JSON.stringify(v):v;if(t==='number'||t==='boolean'||t==='bigint')return String(v);if(t==='symbol')return v.toString();" +
@@ -39,7 +75,13 @@
       "if(d>2)return Array.isArray(v)?'[…]':'{…}';" +
       "if(Array.isArray(v))return'['+v.slice(0,50).map(function(x){return ser(x,d+1)}).join(', ')+(v.length>50?', …':'')+']';" +
       "var k=Object.keys(v).slice(0,30);return(v.constructor&&v.constructor.name&&v.constructor.name!=='Object'?v.constructor.name+' ':'')+'{'+k.map(function(x){return x+': '+ser(v[x],d+1)}).join(', ')+(Object.keys(v).length>30?', …':'')+'}'}catch(e){return'[unprintable]'}}" +
-      "function send(level,args,line,file){try{var m={type:'hq-console',runId:R,level:level,text:Array.prototype.map.call(args,function(a){return ser(a)}).join(' ').slice(0,4000),line:/(^|\\/)script\\.js$/.test(file||'')&&line>1?line-1:0};(P||window.opener)&&(P||window.opener).postMessage(m,O)}catch(e){}}" +
+      // console.log("%s items", n): fill the placeholders like a real console (React's warnings use them)
+      "function fmt(args){args=Array.prototype.slice.call(args);var f=args[0];if(typeof f==='string'&&args.length>1&&/%[sdifoOc]/.test(f)){args.shift();" +
+      "f=f.replace(/%([sdifoOc%])/g,function(all,c){if(c==='%')return'%';if(!args.length)return all;var v=args.shift();return c==='c'?'':c==='d'||c==='i'?String(parseInt(v,10)):c==='f'?String(parseFloat(v)):ser(v)});args.unshift(f)}" +
+      "return args.map(function(a){return ser(a)}).join(' ')}" +
+      // React Router v6 warns about v7 changes on every run; that's noise for someone learning routing
+      "function noise(t){return/^\u26a0\ufe0f React Router Future Flag Warning/.test(t)}" +
+      "function send(level,args,line,file){try{var t=fmt(args);if(noise(t))return;var m={type:'hq-console',runId:R,level:level,text:t.slice(0,4000),line:(file||'').split('/').pop()===" + JSON.stringify(file) + "&&line>1?line-1:0};(P||window.opener)&&(P||window.opener).postMessage(m,O)}catch(e){}}" +
       "['log','info','warn','error','debug','table'].forEach(function(l){var o=console[l];console[l]=function(){send(l==='table'||l==='debug'?'log':l,arguments);try{o&&o.apply(console,arguments)}catch(e){}}});" +
       "window.addEventListener('error',function(e){if(e.error||e.message)send('error',[e.error?(e.error.name+': '+e.error.message):e.message],e.lineno,e.filename)});" +
       "window.addEventListener('unhandledrejection',function(e){send('error',['Uncaught (in promise) '+ser(e.reason)])});" +
@@ -48,13 +90,18 @@
     return "<script>" + code + "<\/script>";
   }
 
-  function build(html, css, js, origin, runId){
+  function build(html, css, js, origin, runId, kind){
+    var K = KINDS[kind], file = K.js, libs = "";
+    if(K.libs){
+      libs = K.libs.concat(/react-router/.test(js) ? K.router : []).map(function(u){ return "<script src=\"" + u + "\"><\/script>"; }).join("");
+      js = compile(js);
+    }
     var style = "<style>\n" + esc(css, "style") + "\n</style>";
-    // label the block as script.js so errors report that file; its first line is this marker, so file line = reported line - 1
-    var body = "/*hq-js*/\n" + esc(js, "script") + "\n//# sourceURL=script.js\n";
+    // label the block with the file name (script.js, App.jsx) so errors report that file; its first line is this marker, so file line = reported line - 1
+    var body = "/*hq-js*/\n" + esc(js, "script") + "\n//# sourceURL=" + file + "\n";
     var jsTag = "<script>" + body + "<\/script>";
     var linkRe = /<link\b[^>]*href\s*=\s*["']?(?:\.\/)?style\.css["']?[^>]*>/i;
-    var scriptRe = /<script\b([^>]*)src\s*=\s*["']?(?:\.\/)?script\.js["']?([^>]*)>\s*<\/script>/i;
+    var scriptRe = new RegExp("<script\\b([^>]*)src\\s*=\\s*[\"']?(?:\\./)?" + file.replace(".", "\\.") + "[\"']?([^>]*)>\\s*<\\/script>", "i");
     var usedCss = linkRe.test(html), usedJs = false, deferJs = false;
     if(usedCss) html = html.replace(linkRe, function(){ return style; });
     html = html.replace(scriptRe, function(all, a, b){
@@ -67,7 +114,7 @@
     var full = /<html[\s>]|<!doctype/i.test(html);
     if(!full) html = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n</head>\n<body>\n" + html + "\n</body>\n</html>";
     // console shim goes first, on the same line as <head>, so line numbers in index.html stay true
-    var s = shim(origin, runId);
+    var s = shim(origin, runId, file) + libs;
     if(/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, function(h){ return h + s; });
     else html = s + html;
     if(!usedCss) html = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, style + "\n</head>") : style + html;

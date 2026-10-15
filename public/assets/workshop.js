@@ -7,11 +7,19 @@
    ========================================================= */
 // locally the runner uses the *other* loopback name, so it is a different site (own process) just like in production
 const RUN_ORIGIN = location.hostname==="localhost" ? "http://127.0.0.1:5174" : location.hostname==="127.0.0.1" ? "http://localhost:5174" : "https://creature-hq-run.web.app";
-const WS_FILES = [["html","index.html"],["css","style.css"],["js","script.js"]];
+// a project's kind decides how the runner treats its three files and what the tabs are called
+const WS_KINDS = {
+  web:  { files:[["html","index.html"],["css","style.css"],["js","script.js"]] },
+  react:{ files:[["html","index.html"],["css","style.css"],["js","App.jsx"]] }
+};
+const wsKindOfPhase = pi => pi===5 ? "react" : "web";
+const wsKind = p => { if(p&&WS_KINDS[p.kind]) return p.kind; const q=p&&p.questId?questOf(p.questId):null; return q?wsKindOfPhase(q.pi):"web"; };
+const wsFiles = p => WS_KINDS[wsKind(p)].files;
+const wsJsName = p => wsFiles(p)[2][1];
 const WS_MAX = 100000;                 // characters per file (matches firestore.rules)
 const WS_SAVE_IDLE = 2000, WS_SAVE_MAX = 10000, WS_RUN_DELAY = 700, WS_STUCK_MS = 3500;
-// quests you can build in the browser: HTML, CSS, JavaScript and API phases, practice and project stages
-const wsQuestOk = (pi,si) => pi>=1 && pi<=4 && ["Tiny Wins","Project","Projects"].includes(phases[pi].stages[si][0]);
+// quests you can build in the browser: HTML, CSS, JavaScript, API and React phases, practice and project stages
+const wsQuestOk = (pi,si) => pi>=1 && pi<=5 && ["Tiny Wins","Project","Projects"].includes(phases[pi].stages[si][0]);
 
 const ws = { list:null, loading:false, error:"", cur:null, editor:null, editorLoading:null,
   dirty:false, saving:false, saveIdle:null, saveMax:null, lastSaveErr:false,
@@ -25,8 +33,8 @@ const wsAgo = t => { const s=Math.max(0,(Date.now()-t)/1000);
 const wsLines = s => s ? s.split("\n").length : 0;
 
 /* ---------- starter files ---------- */
-function wsPage(title, body, extra=""){
-  return '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>'+title+'</title>\n  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n'+body+'\n  <script src="script.js"></script>\n</body>\n</html>\n'+extra;
+function wsPage(title, body, extra="", js="script.js"){
+  return '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>'+title+'</title>\n  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n'+body+'\n  <script src="'+js+'"></script>\n</body>\n</html>\n'+extra;
 }
 const WS_TEMPLATES = {
   blank:{ name:"Untitled project", files:{ html:wsPage("My page","  "), css:"", js:"" } },
@@ -36,7 +44,12 @@ const WS_TEMPLATES = {
     js:'// Runs after the page loads. Try changing what the button does.\nconst button = document.querySelector("#poke");\nconst count = document.querySelector("#count");\nlet clicks = 0;\n\nbutton.addEventListener("click", () => {\n  clicks = clicks + 1;\n  count.textContent = clicks;\n  console.log("poked", clicks, "times");\n});\n' } }
 };
 function wsQuestTemplate(t){
-  return { name:t.q.slice(0,60), questId:t.id, files:{
+  const kind=wsKindOfPhase(t.pi);
+  if(kind==="react") return { name:t.q.slice(0,60), questId:t.id, kind, files:{
+    html:wsPage(esc(t.q),'  <!-- Quest: '+t.q.replace(/--/g,"-")+' -->\n  <!-- React renders into #root. Write your components in App.jsx. -->\n  <div id="root"></div>',"","App.jsx"),
+    css:"/* Styles for this page */\n",
+    js:'// Quest: '+t.q+'\n// You can import from "react", "react-dom/client" and "react-router-dom".\nimport { useState } from "react";\nimport { createRoot } from "react-dom/client";\n\nfunction App() {\n  const [count, setCount] = useState(0);\n  return (\n    <main>\n      <h1>Hello, React</h1>\n      <button onClick={() => setCount(count + 1)}>Clicked {count} times</button>\n    </main>\n  );\n}\n\ncreateRoot(document.getElementById("root")).render(<App />);\n' } };
+  return { name:t.q.slice(0,60), questId:t.id, kind, files:{
     html:wsPage(esc(t.q),'  <!-- Quest: '+t.q.replace(/--/g,"-")+' -->\n  <!-- '+phases[t.pi].short+' · '+t.stage+'. Build it here; the preview updates as you type. -->\n  '),
     css:"/* Styles for this page */\n", js:"// JavaScript for this page\n" } };
 }
@@ -51,7 +64,7 @@ async function wsLoadList(force){
   ws.loading=false;
 }
 function wsEditorModule(){
-  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=16").catch(e=>{ ws.editorLoading=null; throw e; }));
+  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=17").catch(e=>{ ws.editorLoading=null; throw e; }));
 }
 
 /* ---------- view ---------- */
@@ -89,7 +102,7 @@ function wsRenderGallery(el){
     return '<li><article class="ws-card"><button type="button" class="ws-card-open" data-act="ws-open" data-id="'+p.id+'" aria-label="Open '+esc(p.name)+'">'+
       '<span class="ws-card-top"><b>'+esc(p.name)+'</b><small>Edited '+wsAgo(p.updatedAt)+'</small></span>'+
       (q?'<span class="ws-card-quest">'+ic(phases[q.pi].icon)+esc(phases[q.pi].short)+' · '+esc(q.stage)+'</span>':'')+
-      '<span class="ws-card-files">'+WS_FILES.map(([k,n2])=>'<span class="f-'+k+'"><i></i>'+n2+' <em>'+wsLines(f[k]||"")+'</em></span>').join("")+'</span></button>'+
+      '<span class="ws-card-files">'+wsFiles(p).map(([k,n2])=>'<span class="f-'+k+'"><i></i>'+n2+' <em>'+wsLines(f[k]||"")+'</em></span>').join("")+'</span></button>'+
       '<div class="ws-card-actions"><button type="button" class="btn btn-sm btn-ghost" data-act="ws-dup" data-id="'+p.id+'">Duplicate</button><button type="button" class="btn btn-sm btn-ghost btn-danger" data-act="ws-del" data-id="'+p.id+'">Delete</button></div></article></li>';
   }).join("");
   el.innerHTML=head+'<h2 class="ws-section">Start something</h2><div class="ws-starts">'+starts+'</div>'+
@@ -112,7 +125,7 @@ function wsMountEditor(el){
     '</header>'+
     '<div class="ws-body" id="wsBody">'+
       '<section class="ws-code" aria-label="Code">'+
-        '<div class="ws-files" role="tablist" aria-label="Files">'+WS_FILES.map(([k,n2])=>'<button type="button" role="tab" class="ws-file f-'+k+'" data-act="ws-file" data-file="'+k+'" aria-selected="false"><i></i>'+n2+'</button>').join("")+
+        '<div class="ws-files" role="tablist" aria-label="Files">'+wsFiles(p).map(([k,n2])=>'<button type="button" role="tab" class="ws-file f-'+k+'" data-act="ws-file" data-file="'+k+'" aria-selected="false"><i></i>'+n2+'</button>').join("")+
           '<span class="ws-files-hint ws-hide-sm"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> run · <kbd>Ctrl</kbd>+<kbd>S</kbd> save</span></div>'+
         '<div class="ws-editor" id="wsEditor"><p class="ws-editor-wait">Loading editor</p></div>'+
       '</section>'+
@@ -137,7 +150,7 @@ function wsMountEditor(el){
   wsEditorModule().then(mod=>{
     if(!ws.cur||!$("wsEditor")) return;
     $("wsEditor").innerHTML="";
-    ws.editor=mod.createEditor({ parent:$("wsEditor"), files:ws.cur.files, active:ws.cur.file||"html",
+    ws.editor=mod.createEditor({ parent:$("wsEditor"), files:ws.cur.files, active:ws.cur.file||"html", jsx:wsKind(ws.cur)==="react",
       onChange:(name,val)=>{ ws.cur.files[name]=val; wsChanged(true); },
       onRun:()=>wsRun(true), onSave:()=>wsSaveNow() });
     wsRenderBar();
@@ -153,7 +166,7 @@ function wsRenderBar(){
   const p=ws.cur; if(!p||!$("wsStatus")) return;
   const q=p.questId?questOf(p.questId):null;
   $("wsQuest").innerHTML=q?'<button type="button" class="ws-quest-chip" data-act="open-phase" data-pi="'+q.pi+'" data-id="'+q.id+'" title="Show this quest in the roadmap">'+ic(phases[q.pi].icon)+'<span>'+esc(q.q)+'</span></button>':'';
-  const big=WS_FILES.find(([k])=>(p.files[k]||"").length>WS_MAX);
+  const big=wsFiles(p).find(([k])=>(p.files[k]||"").length>WS_MAX);
   $("wsStatus").textContent=big?big[1]+" is over 100 KB and can't be saved":ws.saving?"Saving":ws.dirty?"Unsaved changes":ws.lastSaveErr?"Not saved yet · retrying":"Saved";
   $("wsStatus").className="ws-status"+(big||ws.lastSaveErr?" bad":ws.dirty||ws.saving?" busy":"");
   const active=ws.editor?ws.editor.active:(p.file||"html");
@@ -165,7 +178,7 @@ function wsRenderBar(){
 /* ---------- open / create / delete ---------- */
 async function wsOpen(p){
   await wsFlush();
-  ws.cur={id:p.id,name:p.name,questId:p.questId||null,files:{html:p.files.html||"",css:p.files.css||"",js:p.files.js||""},file:"html"};
+  ws.cur={id:p.id,name:p.name,questId:p.questId||null,kind:wsKind(p),files:{html:p.files.html||"",css:p.files.css||"",js:p.files.js||""},file:"html"};
   ws.logs=[]; ws.paused=false; ws.dirty=false; ws.lastSaveErr=false; ws.lastErrCount=0;
   if(ws.editor){ ws.editor.destroy(); ws.editor=null; }
   const el=$("view-workshop"); el.innerHTML="";
@@ -176,7 +189,7 @@ async function wsCreate(tpl){
   await wsLoadList();
   if(!ws.list) return toast(ws.error||"Projects aren't available right now.","","warn");
   if(ws.list.length>=100) return toast("You have 100 projects. Delete one to make room.","","warn");
-  const p={id:wsId(), name:tpl.name, questId:tpl.questId||null, files:{...tpl.files}, updatedAt:Date.now()};
+  const p={id:wsId(), name:tpl.name, questId:tpl.questId||null, kind:tpl.kind||"web", files:{...tpl.files}, updatedAt:Date.now()};
   ws.list.unshift(p);
   await wsOpen(p);
   await wsSaveNow();   // save straight away so a new project exists even if nothing is typed
@@ -198,7 +211,7 @@ function wsDelete(id){
 }
 function wsDuplicate(id){
   const p=ws.list&&ws.list.find(x=>x.id===id); if(!p) return;
-  wsCreate({name:(p.name+" copy").slice(0,60), files:{...p.files}});
+  return wsCreate({name:(p.name+" copy").slice(0,60), kind:wsKind(p), files:{...p.files}});
 }
 async function wsBack(){
   await wsFlush();
@@ -220,10 +233,10 @@ function wsChanged(code){
 async function wsSaveNow(){
   clearTimeout(ws.saveIdle); clearTimeout(ws.saveMax); ws.saveIdle=ws.saveMax=null;
   const p=ws.cur; if(!p||!HQSync.projects) return;
-  if(WS_FILES.some(([k])=>(p.files[k]||"").length>WS_MAX)){ wsRenderBar(); return; }
+  if(wsFiles(p).some(([k])=>(p.files[k]||"").length>WS_MAX)){ wsRenderBar(); return; }
   if(ws.saving){ ws.saveAgain=true; return; }
   ws.saving=true; ws.dirty=false; wsRenderBar();
-  const snapshot={name:p.name,questId:p.questId,files:{...p.files}};
+  const snapshot={name:p.name,questId:p.questId,kind:p.kind,files:{...p.files}};
   // Firestore waits (rather than failing) while offline; say so instead of spinning forever
   const slow=setTimeout(()=>{ if(ws.saving&&$("wsStatus")){ $("wsStatus").textContent="Offline · will save when you reconnect"; } },6000);
   try{ await HQSync.projects.save(p.id,snapshot); ws.lastSaveErr=false; }
@@ -251,13 +264,13 @@ function wsRun(manual){
   // the runner is another origin, so allow-same-origin gives it that origin (working localStorage/fetch), never ours
   f.setAttribute("sandbox","allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox");
   f.setAttribute("allow","clipboard-write");
-  f.src=RUN_ORIGIN+"/?v=16";
+  f.src=RUN_ORIGIN+"/?v=17";
   $("wsFrameWrap").appendChild(f); ws.frame=f;
   ws.stuckTimer=setTimeout(wsStuck,WS_STUCK_MS+2000);   // generous first timer covers loading the runner page
 }
 function wsSend(win){
   const c=ws.cur; if(!c||!win) return;
-  win.postMessage({type:"hq-run",runId:ws.runId,html:c.files.html,css:c.files.css,js:c.files.js},RUN_ORIGIN);
+  win.postMessage({type:"hq-run",runId:ws.runId,kind:c.kind,html:c.files.html,css:c.files.css,js:c.files.js},RUN_ORIGIN);
 }
 function wsStuck(){
   if(!ws.cur||ws.runState!=="loading") return;
@@ -274,7 +287,9 @@ addEventListener("message",e=>{
     return;
   }
   if(!ws.frame||e.source!==ws.frame.contentWindow||m.runId!==ws.runId) return;
-  if(m.type==="hq-console"){
+  if(m.type==="hq-wait"){   // the runner is downloading libraries (e.g. the React compiler); give it longer before calling it stuck
+    clearTimeout(ws.stuckTimer); ws.stuckTimer=setTimeout(wsStuck,Math.min(60000,+m.ms||WS_STUCK_MS));
+  }else if(m.type==="hq-console"){
     if(ws.logs.length<500) ws.logs.push({level:m.level,text:String(m.text||""),line:+m.line||0});
     else if(ws.logs.length===500) ws.logs.push({level:"warn",text:"Too many messages. Only the first 500 are shown.",line:0});
     wsRenderLogs(); wsLed();
@@ -293,8 +308,8 @@ function wsRenderLogs(){
   const errs=ws.logs.filter(x=>x.level==="error").length, warns=ws.logs.filter(x=>x.level==="warn").length;
   $("wsCounts").innerHTML=(errs?'<span class="c-err">'+errs+'</span>':'')+(warns?'<span class="c-warn">'+warns+'</span>':'');
   ol.innerHTML=ws.logs.length?ws.logs.map(x=>'<li class="lv-'+x.level+'">'+(x.level==="error"?ic("warn"):x.level==="warn"?ic("warn"):'<span class="ws-caret" aria-hidden="true">›</span>')+
-      '<span class="ws-log-text">'+esc(x.text)+'</span>'+(x.line?'<button type="button" class="ws-line" data-act="ws-goto" data-line="'+x.line+'" title="Show this line">script.js:'+x.line+'</button>':'')+'</li>').join("")
-    :'<li class="ws-log-empty">'+(ws.runState==="loading"?"Running":ws.runState==="stuck"?"Stopped. The page never finished loading.":"Nothing logged. Use console.log() in script.js to print here.")+'</li>';
+      '<span class="ws-log-text">'+esc(x.text)+'</span>'+(x.line?'<button type="button" class="ws-line" data-act="ws-goto" data-line="'+x.line+'" title="Show this line">'+esc(wsJsName(ws.cur))+':'+x.line+'</button>':'')+'</li>').join("")
+    :'<li class="ws-log-empty">'+(ws.runState==="loading"?"Running":ws.runState==="stuck"?"Stopped. The page never finished loading.":"Nothing logged. Use console.log() in "+esc(wsJsName(ws.cur))+" to print here.")+'</li>';
   ol.scrollTop=ol.scrollHeight;
 }
 // the companion notices errors and fixes, without nagging

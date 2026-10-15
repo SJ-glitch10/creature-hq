@@ -6,7 +6,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const SITE = (process.env.SITE || "https://creature-hq.web.app").replace(/\/$/, "");
-const V = "16";
+const V = "17";
 const game = fs.readFileSync("public/assets/game.js", "utf8").replace(/\r\n/g, "\n");
 const cut = (from, to) => { const a = game.indexOf(from), b = game.indexOf(to, a); if (a < 0 || b < 0) throw new Error("marker " + from); return game.slice(a, b); };
 
