@@ -85,7 +85,7 @@ async function wsLoadList(force){
   ws.loading=false;
 }
 function wsEditorModule(){
-  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=18").catch(e=>{ ws.editorLoading=null; throw e; }));
+  return ws.editorLoading || (ws.editorLoading = import("/assets/editor.js?v=19").catch(e=>{ ws.editorLoading=null; throw e; }));
 }
 
 /* ---------- view ---------- */
@@ -277,16 +277,25 @@ function wsRun(manual){
   if(!ws.cur||!$("wsFrameWrap")) return;
   if(manual){ ws.paused=false; }
   if(ws.paused) return;
-  wsKillFrame();
+  // a frame running a real WebContainer reuses across runs: it booted once (~seconds) and has a live terminal the
+  // student typed into, so a teardown+reload per keystroke would both be slow and wipe their shell. The old stand-in
+  // (no confirmed WebContainer) keeps reloading per run as before — it calls document.write() per run, which wipes
+  // the frame's own message listener, so a second message after the first run would never arrive.
+  const reuse=ws.cur.kind==="node"&&ws.frame&&ws.frameKind==="node-wc";
+  if(!reuse) wsKillFrame();
   ws.runId++; ws.logs=[]; ws.runState="loading"; wsRenderLogs(); wsLed();
   $("wsStuck").hidden=true;
+  if(reuse){ wsSend(ws.frame.contentWindow); ws.stuckTimer=setTimeout(wsStuck,WS_STUCK_MS+2000); return; }
   const f=document.createElement("iframe");
   f.title="Preview of "+ws.cur.name;
   // the runner is another origin, so allow-same-origin gives it that origin (working localStorage/fetch), never ours
   f.setAttribute("sandbox","allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox");
   f.setAttribute("allow","clipboard-write");
-  f.src=RUN_ORIGIN+"/?v=18";
-  $("wsFrameWrap").appendChild(f); ws.frame=f;
+  // credentialless: lets the node runner cross-origin-isolate itself (needed for WebContainers' real Node + terminal)
+  // without this app's own pages needing COOP/COEP headers. Chromium only; other browsers fall back to the old stand-in.
+  if(ws.cur.kind==="node") f.setAttribute("credentialless","");
+  f.src=RUN_ORIGIN+"/?v=19";
+  $("wsFrameWrap").appendChild(f); ws.frame=f; ws.frameKind=ws.cur.kind;
   ws.stuckTimer=setTimeout(wsStuck,WS_STUCK_MS+2000);   // generous first timer covers loading the runner page
 }
 function wsSend(win){
@@ -307,6 +316,8 @@ addEventListener("message",e=>{
     else if(ws.tabWin&&e.source===ws.tabWin){ wsSend(ws.tabWin); ws.tabWin=null; }
     return;
   }
+  // a real WebContainer booted: from here on this frame can be sent new files in place instead of reloaded per run
+  if(m.type==="hq-wc-persist"){ if(ws.frame&&e.source===ws.frame.contentWindow) ws.frameKind="node-wc"; return; }
   if(!ws.frame||e.source!==ws.frame.contentWindow||m.runId!==ws.runId) return;
   if(m.type==="hq-wait"){   // the runner is downloading libraries (e.g. the React compiler); give it longer before calling it stuck
     clearTimeout(ws.stuckTimer); ws.stuckTimer=setTimeout(wsStuck,Math.min(60000,+m.ms||WS_STUCK_MS));

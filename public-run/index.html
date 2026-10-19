@@ -144,9 +144,101 @@
     return out;
   }
 
-  /* ---------- Node: server.js and module.js run as CommonJS modules on small stand-ins for http and express.
-     Not real Node: just what the Node and Express quests use. A listening server gets requests from a panel in the preview. ---------- */
+  /* ---------- Node: real Node + a real terminal via WebContainers when the browser can cross-origin-isolate a
+     credentialless iframe (Chromium); everyone else falls back to the old stand-in below (runNodeShim). ---------- */
+  var wcBoot = null, wc = { ready:false };   // one container per iframe lifetime; survives reruns, torn down when the iframe is removed
+  function getContainer(){
+    if(!wcBoot) wcBoot = import(NPM + "@webcontainer/api@1.6.1/+esm").then(function(mod){ return mod.WebContainer.boot({ workdirName:"app" }); });
+    return wcBoot;
+  }
+  function loadCss(href){
+    if(document.querySelector("link[href=\"" + href + "\"]")) return;
+    var l = document.createElement("link"); l.rel = "stylesheet"; l.href = href; document.head.appendChild(l);
+  }
   function runNode(m, origin){
+    if(!window.crossOriginIsolated) return runNodeShim(m, origin);
+    runNodeWC(m, origin).catch(function(e){
+      wcBoot = null; wc.ready = false;   // boot or spawn failed (quota, offline, old build) — the quest still has to work
+      runNodeShim(m, origin);
+    });
+  }
+  // .js that `require`s express gets a package.json and an `npm install`; plain http quests skip it and start instantly
+  function usesExpress(js){ return /require\(\s*['"]express['"]\s*\)/.test(js); }
+  function runNodeWC(m, origin){
+    var runId = m.runId, env = parseEnv(String(m.html||"")), js = String(m.js||"");
+    var first = !wc.ready;
+    if(first){
+      document.open();
+      document.write("<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"UTF-8\"><style>" + NODE_CSS + TERM_CSS + "</style></head><body>" + NODE_PANEL + TERM_PANEL + "</body></html>");
+      document.close();
+      wc.term = null; wc.node = null;
+    }
+    host.postMessage({type:"hq-wait", runId:runId, ms:first ? 60000 : 20000}, origin);   // first boot downloads the VM + npm install; reruns are near-instant
+    var status = function(text, cls){ var s = document.getElementById("st"); if(s){ s.textContent = text; s.className = "st " + (cls||""); } };
+    status("Starting" + (first ? " (first run downloads the in-browser Node runtime)…" : "…"));
+    return getContainer().then(function(container){
+      wc.c = container; wc.ready = true;
+      host.postMessage({type:"hq-wc-persist"}, origin);   // confirms a real container is up: the app can keep reusing this iframe instead of reloading it per run
+      var files = { "server.js":{file:{contents:js}}, "module.js":{file:{contents:String(m.css||"")}}, ".env":{file:{contents:String(m.html||"")}} };
+      var express = usesExpress(js);
+      if(express) files["package.json"] = { file:{ contents: JSON.stringify({name:"app", private:true, type:"commonjs", dependencies:{express:"^4.19.2"}}) } };
+      return container.mount(files).then(function(){
+        return (wc.node ? wc.node.kill() : Promise.resolve());
+      }).then(function(){
+        if(!express) return 0;
+        status("Installing express…");
+        return container.spawn("npm", ["install"]).then(function(p){ return p.exit; });
+      }).then(function(code){
+        if(code) host.postMessage({type:"hq-console", runId:runId, level:"error", text:"npm install failed (exit "+code+"). Open the terminal below to see why.", line:0}, origin);
+        return container.spawn("node", ["server.js"], { env:env });
+      }).then(function(proc){
+        wc.node = proc;
+        var done = false, done2 = function(){ if(!done){ done = true; host.postMessage({type:"hq-loaded", runId:runId}, origin); status("Running. Use the terminal to send it a real request, e.g. curl localhost:3000.", "ok"); } };
+        proc.output.pipeTo(new WritableStream({ write:function(chunk){
+          String(chunk).replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/).forEach(function(line){
+            if(!line) return;
+            host.postMessage({type:"hq-console", runId:runId, level:/error/i.test(line) ? "error" : "log", text:line.slice(0,4000), line:0}, origin);
+          });
+        }}));
+        container.on("server-ready", function(){ done2(); });
+        proc.exit.then(function(code){
+          done2();
+          host.postMessage({type:"hq-console", runId:runId, level: code ? "error" : "log", text:"Process exited with code " + code + ".", line:0}, origin);
+        });
+        setTimeout(done2, 1500);   // a script with no server (just console.log) never fires server-ready; stop the stuck timer anyway
+        if(first) return startTerminal(container);
+      });
+    });
+  }
+  var TERM_PANEL = "<div class=\"term\"><div class=\"term-head\">Terminal<button type=\"button\" id=\"termClear\">Clear</button></div><div id=\"term\"></div></div>";
+  var TERM_CSS = ".term{border-top:1px solid #e4e5e1;margin-top:10px}.term-head{display:flex;justify-content:space-between;align-items:center;font:12px ui-monospace,monospace;color:#9a9ea6;padding:6px 2px}" +
+    ".term-head button{font:11px ui-monospace,monospace;border:1px solid #3a3d42;border-radius:4px;background:#26282f;color:#c9cbd1;padding:2px 8px;cursor:pointer}" +
+    "#term{height:220px;background:#1e1e1e;border-radius:6px;padding:4px}";
+  // a real shell (jsh) in the same container/filesystem the server runs in — ls, cat, npm install, node, git, all real
+  function startTerminal(container){
+    return Promise.all([
+      import(NPM + "@xterm/xterm@5.5.0/+esm"),
+      loadCss(NPM + "@xterm/xterm@5.5.0/css/xterm.css")
+    ]).then(function(r){
+      var term = new r[0].Terminal({ convertEol:true, fontSize:12, theme:{background:"#1e1e1e", foreground:"#d4d4d4"} });
+      term.open(document.getElementById("term"));
+      wc.term = term;
+      var clear = document.getElementById("termClear"); if(clear) clear.onclick = function(){ term.clear(); };
+      return container.spawn("jsh", { terminal:{cols:term.cols, rows:term.rows} }).then(function(shell){
+        wc.shell = shell;
+        shell.output.pipeTo(new WritableStream({ write:function(chunk){ term.write(chunk); } }));
+        var writer = shell.input.getWriter();
+        term.onData(function(d){ writer.write(d); });
+      });
+    }).catch(function(e){
+      var t = document.getElementById("term"); if(t) t.textContent = "Couldn't load the terminal (" + (e&&e.message||e) + ").";
+    });
+  }
+
+  /* ---------- Node fallback: server.js and module.js run as CommonJS modules on small stand-ins for http and express.
+     Not real Node: just what the Node and Express quests use, for browsers that can't cross-origin-isolate a credentialless
+     iframe (Firefox, Safari). A listening server gets requests from a panel in the preview; no terminal. ---------- */
+  function runNodeShim(m, origin){
     var files = { "server.js": String(m.js||""), "module.js": String(m.css||"") };
     window.__hqNode = nodeRuntime(files, parseEnv(String(m.html||"")), "hqReq:" + String(m.id||"").slice(0, 40));
     // each file becomes a module function in its own blob script: syntax errors then report the blob's line, runtime stacks the sourceURL.

@@ -344,6 +344,9 @@ console.log("workshop in the app");
 const app = await browser.newPage();
 // uncaught errors in the app itself (not the student's code in the preview frame)
 await app.addInitScript(() => { if(location.port === "5173") addEventListener("error", e => (window.__errs ||= []).push(e.message)); });
+// node quests must stay on the offline stand-in in CI: the real WebContainer path needs a live boot from StackBlitz's
+// service, which would make this suite flaky and dependent on network access it isn't meant to need
+await app.addInitScript(() => { try{ Object.defineProperty(window, "crossOriginIsolated", { value:false, configurable:true }); }catch(e){} });
 await app.goto("http://127.0.0.1:5173/app");
 await app.evaluate(() => { localStorage.clear(); localStorage.setItem("hqRulesSeen", "1"); });
 await app.reload();

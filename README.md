@@ -49,7 +49,9 @@ Older projects saved without `kind` get one from their quest, or `web` otherwise
 
 ### Node and Express (`node` kind)
 
-A browser can't run Node, so the runner provides small stand-ins for what the Node and Express quests use. It is **not** real Node.
+On Chromium browsers (Chrome, Edge), the runner's iframe is `credentialless`, which lets it cross-origin-isolate itself without the rest of the site needing COOP/COEP headers. That isolation lets it boot a real **[WebContainer](https://webcontainers.io)** — real Node, running `server.js` for real, with a real interactive terminal (`jsh`, via xterm.js) in the same filesystem the server runs in: `npm install`, `node`, `cat`, `git`, anything a real shell does. `.env` is passed in as real process env vars. A `require("express")` project gets a generated `package.json` and an `npm install` (cached across reruns); a plain `require("http")` script skips that and starts instantly. The WebContainer boots once per Workshop session and is reused across runs (and across projects) rather than rebooting on every keystroke; it's only torn down when you leave the `node` kind.
+
+Firefox and Safari can't cross-origin-isolate a credentialless iframe yet, so they fall back to a hand-written stand-in for `http`/`express` — **not** real Node, no terminal, no npm:
 
 - `server.js` and `module.js` run as CommonJS modules (`require`, `module.exports`, `exports`, `__dirname`). Each one is loaded as its own blob script, so errors point at the right file and line, including syntax errors.
 - `.env` is loaded into `process.env` on every run, like `node --env-file=.env`. `require("dotenv").config()` also works. `process.exit()` stops the script.
@@ -58,6 +60,8 @@ A browser can't run Node, so the runner provides small stand-ins for what the No
 - `express` follows Express 5 behaviour. It supports `get`, `post`, `put`, `patch`, `delete`, `all`, `use`, `route`, `Router()`, `:params`, `req.query`, `express.json()` and `express.urlencoded()` (`req.body` stays `undefined` without them), and `status`, `json`, `send`, `sendStatus` and `redirect`. Middleware and four-argument error handlers work, and so do thrown and async errors. Unmatched routes get `Cannot GET /path`, and answering twice gives `ERR_HTTP_HEADERS_SENT`.
 - Once a server calls `listen()`, the preview shows a request panel (method, path, JSON body). The first request goes to the app's first plain GET route, or `/`. The last request is saved per project in the runner's `localStorage` and replayed on every run, so a code change shows its new response straight away. A request with no answer after 5 seconds is reported. HTML responses render in a sandboxed frame with scripts disabled.
 - Server state lives in memory and starts fresh on every run. Real npm packages, databases and the file system aren't available.
+
+WebContainers' license is free for local development and for production use by public, OSI-licensed open-source projects (this repo now ships an MIT `LICENSE`); other production use needs a commercial agreement with StackBlitz.
 
 **Known issue:** after an endless loop, the Workshop marks the run as stuck and removes the preview, but the loop keeps the runner site's browser process busy. Any kind can hit this (`while (true)`, or a SQL query that never ends). The next run then reports stuck too. Seen in Chrome on 2026-10-14 and not yet fixed.
 
