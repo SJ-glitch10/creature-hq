@@ -1354,7 +1354,7 @@ function renderToday(){
       (sub?'<span class="tag-xp">'+ic("doc")+'Proof required · '+fmtN(subBaseXP(n.pi,n.si))+' xp</span>':'<span class="mono" style="font-size:12px">Trains '+trainText(TRAIN[st])+'</span>')+'</div>'+
       '<div class="actions">'+(sub&&!state.subs[id]&&quizPass(id)===5?'<button type="button" class="btn btn-primary" data-act="submit" data-id="'+id+'">'+ic("doc")+'Submit proof</button>'
         :'<button type="button" class="btn btn-primary" data-act="quiz" data-id="'+id+'">'+ic("check")+(quizPass(id)?'Continue quiz':'Take quiz')+'</button>'+(sub&&!state.subs[id]?'<button type="button" class="btn" data-act="submit" data-id="'+id+'">'+ic("doc")+'Submit proof</button>':''))+
-      (typeof wsQuestOk==="function"&&wsQuestOk(n.pi,n.si)?'<button type="button" class="btn" data-act="ws-quest" data-id="'+id+'">'+ic("html")+'Code it</button>':'')+
+      (typeof wsQuestOk==="function"&&wsQuestOk(n.pi,n.si,n.qi)?'<button type="button" class="btn" data-act="ws-quest" data-id="'+id+'">'+ic("html")+'Code it</button>':'')+
       '<button type="button" class="btn" data-act="notes" data-id="'+id+'">'+ic("pencil")+'Notes</button>'+
       '<button type="button" class="btn" data-act="open-phase" data-pi="'+n.pi+'" data-id="'+id+'">Show in roadmap</button>'+
       '<button type="button" class="btn btn-ghost" data-act="shuffle">'+ic("dice")+'Pick another</button></div>';
@@ -1439,7 +1439,7 @@ function renderRoadmap(){
         '<span class="q-state'+(!done&&passed?' part':'')+'" style="--p:'+(passed*20)+'%" aria-hidden="true">'+(done?ic("check"):'')+'</span>'+
         '<span class="q-main"><span class="q-text">'+esc(q)+'</span><span class="q-meta">'+meta.join("")+'</span></span>'+
         '<span class="q-actions"><button type="button" class="btn btn-sm btn-icon btn-ghost note-btn'+(noted?' has':'')+'" data-act="notes" data-id="'+id+'" aria-label="'+(noted?'Open notes':'Add notes')+' for '+esc(q)+'" title="Notes">'+ic("pencil")+'</button>'+
-          (avail&&typeof wsQuestOk==="function"&&wsQuestOk(pi,si)?'<button type="button" class="btn btn-sm" data-act="ws-quest" data-id="'+id+'" title="Build it in the Workshop">'+ic("html")+'Code it</button>':'')+proofBtn+quizBtn+'</span></div>';
+          (avail&&typeof wsQuestOk==="function"&&wsQuestOk(pi,si,qi)?'<button type="button" class="btn btn-sm" data-act="ws-quest" data-id="'+id+'" title="Build it in the Workshop">'+ic("html")+'Code it</button>':'')+proofBtn+quizBtn+'</span></div>';
     }).join("");
     stages+='<section class="stage"><header class="stage-head"><h3>'+esc(stage[0])+'</h3><span class="muted">'+dc+'/'+stage[1].length+'</span>'+
       '<span class="stage-rule'+(sub?' proof':'')+'">'+(sub?ic("doc")+'Quiz and proof · gives XP':'Quiz · trains '+trainText(tr))+'</span></header>'+

@@ -23,15 +23,544 @@
     var m = e.data || {};
     if(m.type !== "hq-run") return;
     if(window.opener) window.opener = null;   // a preview tab can't redirect the app tab
-    var built = build(String(m.html||""), String(m.css||""), String(m.js||""), e.origin, m.runId);
-    document.open(); document.write(built); document.close();
+    var kind = KINDS[m.kind] ? m.kind : "web", origin = e.origin;
+    if(kind === "sql") return runSql(String(m.js||""), origin, m.runId);
+    if(kind === "node") return runNode(m, origin);
+    var go = function(){
+      var built = build(String(m.html||""), String(m.css||""), String(m.js||""), origin, m.runId, kind);
+      host.postMessage({type:"hq-wait", runId:m.runId, ms:3500}, origin);   // libraries are in; back to the normal stuck timer
+      document.open(); document.write(built); document.close();
+    };
+    if(KINDS[kind].compiler && !window.Babel){
+      host.postMessage({type:"hq-wait", runId:m.runId, ms:30000}, origin);
+      var s = document.createElement("script");
+      s.src = KINDS[kind].compiler; s.onload = go; s.onerror = go;   // without Babel, compile() reports the failure
+      document.head.appendChild(s);
+    }else go();
   });
+
+  // what each project kind does with script.js; versions are pinned so a student's project keeps working
+  var NPM = "https://cdn.jsdelivr.net/npm/";
+  var KINDS = {
+    web:   { js:"script.js" },
+    react: { js:"App.jsx", compiler: NPM + "@babel/standalone@7.29.10/babel.min.js",
+      // development builds: their warnings (missing keys, bad hooks) are part of learning React
+      libs: [NPM + "react@18.3.1/umd/react.development.js", NPM + "react-dom@18.3.1/umd/react-dom.development.js"],
+      router: [NPM + "@remix-run/router@1.23.2/dist/router.umd.min.js", NPM + "react-router@6.30.6/dist/umd/react-router.development.js",
+        NPM + "react-router-dom@6.30.6/dist/umd/react-router-dom.development.js"] },
+    node:  { js:"server.js" },
+    sql:   { js:"query.sql", pglite: NPM + "@electric-sql/pglite@0.5.9/dist/index.js" }
+  };
+  // import/require inside App.jsx. Kept on one line so it doesn't shift line numbers.
+  var REQUIRE = "var exports={},module={exports:exports};function require(n){var m={'react':window.React,'react-dom':window.ReactDOM,'react-dom/client':window.ReactDOM," +
+    "'react-router-dom':window.ReactRouterDOM,'react-router':window.ReactRouter}[n];if(m)return m;if(/\\.css$/.test(n))return{};" +
+    "throw new Error(\"Can't import '\"+n+\"'. In the Workshop you can import react, react-dom/client and react-router-dom.\")}";
+
+  // JSX + import/export -> plain script, keeping every line where it was so errors point at the right line
+  function compile(src){
+    if(!window.Babel) return "throw new Error(\"Couldn't load the React compiler. Check your connection, then press Run.\");";
+    try{
+      return REQUIRE + Babel.transform(src, {presets:["react"], plugins:["transform-modules-commonjs"], retainLines:true, sourceType:"module", filename:"App.jsx"}).code;
+    }catch(err){
+      var line = err.loc && err.loc.line || 1, msg = String(err.message||err).replace(/^.*?: /, "").split("\n")[0];
+      return new Array(line).join("\n") + "throw new SyntaxError(" + JSON.stringify(msg) + ");";
+    }
+  }
+
+  /* ---------- SQL: a fresh PostgreSQL (PGlite) per run; statements run one by one so each shows its result ---------- */
+  function runSql(src, origin, runId){
+    var say = function(level, text, line){ host.postMessage({type:"hq-console", runId:runId, level:level, text:text, line:line||0}, origin); };
+    var out = [];
+    var page = function(){
+      host.postMessage({type:"hq-wait", runId:runId, ms:3500}, origin);
+      var body = out.join("") || "<p class=\"none\">Nothing to run yet. Write some SQL in query.sql.</p>";
+      document.open(); document.write("<!DOCTYPE html>\n<html lang=\"en\">\n<head>" + shim(origin, runId, {"query.sql":"js"}) + "<meta charset=\"UTF-8\"><style>" + SQL_CSS + "</style></head><body>" + body + "</body></html>"); document.close();
+    };
+    host.postMessage({type:"hq-wait", runId:runId, ms:60000}, origin);   // first run downloads the database (a few MB)
+    import(KINDS.sql.pglite).then(function(mod){ return mod.PGlite.create(); }).then(function(db){
+      host.postMessage({type:"hq-wait", runId:runId, ms:8000}, origin);   // a query that runs longer than this is treated as stuck
+      var parts = splitSql(src), i = 0;
+      var next = function(){
+        if(i >= parts.length) return page();
+        var p = parts[i++];
+        return db.query(p.text).then(function(r){ out.push(sqlResult(p, r)); return next(); }, function(err){
+          var line = p.line + (err.position ? lineOf(p.text, Number(err.position) - 1) : 0);
+          var msg = "ERROR: " + err.message + (err.detail ? "\n" + err.detail : "") + (err.hint ? "\nHint: " + err.hint : "");
+          say("error", msg, line);
+          out.push("<section class=\"err\"><pre class=\"stmt\">" + escHtml(head(p.text)) + "</pre><p>" + escHtml(msg) + "</p><p class=\"meta\">query.sql line " + line +
+            (i < parts.length ? " · stopped here, " + (parts.length - i) + " more statement" + (parts.length - i === 1 ? "" : "s") + " not run" : "") + "</p></section>");
+          page();
+        });
+      };
+      next();
+    }).catch(function(e){ say("error", "Couldn't start the database (" + (e && e.message || e) + "). Check your connection, then press Run."); page(); });
+  }
+  var SQL_CSS = "body{margin:0;padding:12px;font:13px/1.5 system-ui,sans-serif;color:#26282f;background:#fff}section{margin:0 0 14px}" +
+    ".stmt{margin:0 0 4px;font:12px ui-monospace,monospace;color:#555961;white-space:pre-wrap}.meta,.none{color:#6b6f78;margin:2px 0}" +
+    "table{border-collapse:collapse;font:12px ui-monospace,monospace}th,td{border:1px solid #d6d8dc;padding:3px 8px;text-align:left;vertical-align:top}" +
+    "th{background:#f2f3ef}td.null{color:#9a9ea6;font-style:italic}.ok{color:#2f7d32;margin:0}.err p{margin:2px 0;color:#b3261e;white-space:pre-wrap}";
+  var escHtml = function(s){ return String(s).replace(/[&<>"]/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]; }); };
+  var lineOf = function(s, idx){ return s.slice(0, Math.max(0, idx)).split("\n").length - 1; };
+  // the statement without its leading comments, first line only: what the result is labelled with
+  var head = function(t){ var l = t.replace(/^(\s*(--[^\n]*|\/\*[\s\S]*?\*\/))*\s*/, "").split("\n"); return l[0].slice(0, 100) + (l.length > 1 || l[0].length > 100 ? " …" : ""); };
+  function cell(v){
+    if(v === null || v === undefined) return "<td class=\"null\">NULL</td>";
+    if(v instanceof Date) v = isNaN(v) ? String(v) : v.toISOString();
+    else if(v instanceof Uint8Array) v = "\\x" + Array.prototype.map.call(v, function(b){ return (b < 16 ? "0" : "") + b.toString(16); }).join("");
+    else if(typeof v === "object") v = JSON.stringify(v);
+    return "<td>" + escHtml(v) + "</td>";
+  }
+  function sqlResult(p, r){
+    var h = "<section><pre class=\"stmt\">" + escHtml(head(p.text)) + "</pre>", fields = r.fields || [], rows = r.rows || [], MAX = 200;
+    if(fields.length){
+      h += "<table><thead><tr>" + fields.map(function(f){ return "<th>" + escHtml(f.name) + "</th>"; }).join("") + "</tr></thead><tbody>" +
+        rows.slice(0, MAX).map(function(row){ return "<tr>" + fields.map(function(f){ return cell(row[f.name]); }).join("") + "</tr>"; }).join("") + "</tbody></table>" +
+        "<p class=\"meta\">" + rows.length + " row" + (rows.length === 1 ? "" : "s") + (rows.length > MAX ? ", first " + MAX + " shown" : "") + "</p>";
+    }else{
+      var verb = head(p.text).split(/\s+/).slice(0, 2).join(" ").toUpperCase().replace(/[^A-Z ]/g, "").trim();
+      var n = /^(INSERT|UPDATE|DELETE|MERGE)/.test(verb) && typeof r.affectedRows === "number" ? " · " + r.affectedRows + " row" + (r.affectedRows === 1 ? "" : "s") : "";
+      h += "<p class=\"ok\">✓ " + escHtml((/^(INSERT|UPDATE|DELETE|MERGE)/.exec(verb) || [verb])[0]) + n + "</p>";
+    }
+    return h + "</section>";
+  }
+  // split on ; outside strings, quoted names, comments and $tag$ bodies; remember where each statement starts
+  function splitSql(src){
+    var out = [], start = 0, i = 0, n = src.length;
+    var push = function(end){
+      var raw = src.slice(start, end), lead = raw.match(/^\s*/)[0].length, text = raw.slice(lead).replace(/\s+$/, "");
+      if(text.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, "").trim()) out.push({ text:text, line:lineOf(src, start + lead) + 1 });
+      start = end + 1;
+    };
+    while(i < n){
+      var c = src[i], d = src[i + 1];
+      if(c === "-" && d === "-"){ i = src.indexOf("\n", i); if(i < 0) i = n; continue; }
+      if(c === "/" && d === "*"){ i = src.indexOf("*/", i + 2); i = i < 0 ? n : i + 2; continue; }
+      if(c === "'" || c === "\""){ var j = i + 1; while(j < n && !(src[j] === c && src[j + 1] !== c)){ j += src[j] === c ? 2 : 1; } i = j + 1; continue; }
+      if(c === "$"){ var t = /^\$[A-Za-z_]*\$/.exec(src.slice(i, i + 64)); if(t){ var e2 = src.indexOf(t[0], i + t[0].length); i = e2 < 0 ? n : e2 + t[0].length; continue; } }
+      if(c === ";") push(i);
+      i++;
+    }
+    push(n);
+    return out;
+  }
+
+  /* ---------- Node: real Node + a real terminal via WebContainers when the browser can cross-origin-isolate a
+     credentialless iframe (Chromium); everyone else falls back to the old stand-in below (runNodeShim). ---------- */
+  var wcBoot = null, wc = { ready:false };   // one container per iframe lifetime; survives reruns, torn down when the iframe is removed
+  function getContainer(){
+    if(!wcBoot) wcBoot = import(NPM + "@webcontainer/api@1.6.1/+esm").then(function(mod){ return mod.WebContainer.boot({ workdirName:"app" }); });
+    return wcBoot;
+  }
+  function loadCss(href){
+    if(document.querySelector("link[href=\"" + href + "\"]")) return;
+    var l = document.createElement("link"); l.rel = "stylesheet"; l.href = href; document.head.appendChild(l);
+  }
+  function runNode(m, origin){
+    if(!window.crossOriginIsolated) return runNodeShim(m, origin);
+    runNodeWC(m, origin).catch(function(e){
+      wcBoot = null; wc.ready = false;   // boot or spawn failed (quota, offline, old build) — the quest still has to work
+      runNodeShim(m, origin);
+    });
+  }
+  // .js that `require`s express gets a package.json and an `npm install`; plain http quests skip it and start instantly
+  function usesExpress(js){ return /require\(\s*['"]express['"]\s*\)/.test(js); }
+  function runNodeWC(m, origin){
+    var runId = m.runId, env = parseEnv(String(m.html||"")), js = String(m.js||"");
+    var first = !wc.ready;
+    if(first){
+      document.open();
+      document.write("<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"UTF-8\"><style>" + NODE_CSS + TERM_CSS + "</style></head><body>" + NODE_PANEL + TERM_PANEL + "</body></html>");
+      document.close();
+      wc.term = null; wc.node = null;
+    }
+    host.postMessage({type:"hq-wait", runId:runId, ms:first ? 60000 : 20000}, origin);   // first boot downloads the VM + npm install; reruns are near-instant
+    var status = function(text, cls){ var s = document.getElementById("st"); if(s){ s.textContent = text; s.className = "st " + (cls||""); } };
+    status("Starting" + (first ? " (first run downloads the in-browser Node runtime)…" : "…"));
+    return getContainer().then(function(container){
+      wc.c = container; wc.ready = true;
+      host.postMessage({type:"hq-wc-persist"}, origin);   // confirms a real container is up: the app can keep reusing this iframe instead of reloading it per run
+      var files = { "server.js":{file:{contents:js}}, "module.js":{file:{contents:String(m.css||"")}}, ".env":{file:{contents:String(m.html||"")}} };
+      var express = usesExpress(js);
+      if(express) files["package.json"] = { file:{ contents: JSON.stringify({name:"app", private:true, type:"commonjs", dependencies:{express:"^4.19.2"}}) } };
+      return container.mount(files).then(function(){
+        return (wc.node ? wc.node.kill() : Promise.resolve());
+      }).then(function(){
+        if(!express) return 0;
+        status("Installing express…");
+        return container.spawn("npm", ["install"]).then(function(p){ return p.exit; });
+      }).then(function(code){
+        if(code) host.postMessage({type:"hq-console", runId:runId, level:"error", text:"npm install failed (exit "+code+"). Open the terminal below to see why.", line:0}, origin);
+        return container.spawn("node", ["server.js"], { env:env });
+      }).then(function(proc){
+        wc.node = proc;
+        var done = false, done2 = function(){ if(!done){ done = true; host.postMessage({type:"hq-loaded", runId:runId}, origin); status("Running. Use the terminal to send it a real request, e.g. curl localhost:3000.", "ok"); } };
+        proc.output.pipeTo(new WritableStream({ write:function(chunk){
+          String(chunk).replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/).forEach(function(line){
+            if(!line) return;
+            host.postMessage({type:"hq-console", runId:runId, level:/error/i.test(line) ? "error" : "log", text:line.slice(0,4000), line:0}, origin);
+          });
+        }}));
+        container.on("server-ready", function(){ done2(); });
+        proc.exit.then(function(code){
+          done2();
+          host.postMessage({type:"hq-console", runId:runId, level: code ? "error" : "log", text:"Process exited with code " + code + ".", line:0}, origin);
+        });
+        setTimeout(done2, 1500);   // a script with no server (just console.log) never fires server-ready; stop the stuck timer anyway
+        if(first) return startTerminal(container);
+      });
+    });
+  }
+  var TERM_PANEL = "<div class=\"term\"><div class=\"term-head\">Terminal<button type=\"button\" id=\"termClear\">Clear</button></div><div id=\"term\"></div></div>";
+  var TERM_CSS = ".term{border-top:1px solid #e4e5e1;margin-top:10px}.term-head{display:flex;justify-content:space-between;align-items:center;font:12px ui-monospace,monospace;color:#9a9ea6;padding:6px 2px}" +
+    ".term-head button{font:11px ui-monospace,monospace;border:1px solid #3a3d42;border-radius:4px;background:#26282f;color:#c9cbd1;padding:2px 8px;cursor:pointer}" +
+    "#term{height:220px;background:#1e1e1e;border-radius:6px;padding:4px}";
+  // a real shell (jsh) in the same container/filesystem the server runs in — ls, cat, npm install, node, git, all real
+  function startTerminal(container){
+    return Promise.all([
+      import(NPM + "@xterm/xterm@5.5.0/+esm"),
+      loadCss(NPM + "@xterm/xterm@5.5.0/css/xterm.css")
+    ]).then(function(r){
+      var term = new r[0].Terminal({ convertEol:true, fontSize:12, theme:{background:"#1e1e1e", foreground:"#d4d4d4"} });
+      term.open(document.getElementById("term"));
+      wc.term = term;
+      var clear = document.getElementById("termClear"); if(clear) clear.onclick = function(){ term.clear(); };
+      return container.spawn("jsh", { terminal:{cols:term.cols, rows:term.rows} }).then(function(shell){
+        wc.shell = shell;
+        shell.output.pipeTo(new WritableStream({ write:function(chunk){ term.write(chunk); } }));
+        var writer = shell.input.getWriter();
+        term.onData(function(d){ writer.write(d); });
+      });
+    }).catch(function(e){
+      var t = document.getElementById("term"); if(t) t.textContent = "Couldn't load the terminal (" + (e&&e.message||e) + ").";
+    });
+  }
+
+  /* ---------- Node fallback: server.js and module.js run as CommonJS modules on small stand-ins for http and express.
+     Not real Node: just what the Node and Express quests use, for browsers that can't cross-origin-isolate a credentialless
+     iframe (Firefox, Safari). A listening server gets requests from a panel in the preview; no terminal. ---------- */
+  function runNodeShim(m, origin){
+    var files = { "server.js": String(m.js||""), "module.js": String(m.css||"") };
+    window.__hqNode = nodeRuntime(files, parseEnv(String(m.html||"")), "hqReq:" + String(m.id||"").slice(0, 40));
+    // each file becomes a module function in its own blob script: syntax errors then report the blob's line, runtime stacks the sourceURL.
+    // The wrapper sits on the marker's next line, so file line = script line - 1 either way.
+    var slots = { "server.js":"js", "module.js":"css" }, map = { "server.js":"js", "module.js":"css" };
+    var scripts = Object.keys(files).map(function(f){
+      var url = URL.createObjectURL(new Blob(["/*hq-js*/\n__hqNode.define(" + JSON.stringify(f) + ",function(exports,require,module,__filename,__dirname,process,global){" +
+        files[f] + "\n});\n//# sourceURL=" + f + "\n"], { type: "text/javascript" }));
+      map[url.split("/").pop()] = slots[f];
+      return "<script src=\"" + url + "\"><\/script>";
+    }).join("");
+    document.open();
+    document.write("<!DOCTYPE html>\n<html lang=\"en\">\n<head>" + shim(origin, m.runId, map) + "<meta charset=\"UTF-8\"><style>" + NODE_CSS + "</style></head><body>" +
+      NODE_PANEL + scripts + "<script>__hqNode.main()<\/script></body></html>");
+    document.close();
+  }
+  var NODE_PANEL = "<p id=\"st\" class=\"st\">Starting</p><form id=\"rq\" hidden><select id=\"m\" aria-label=\"Method\"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select>" +
+    "<input id=\"u\" aria-label=\"Path\" value=\"/\" spellcheck=\"false\"><button>Send</button><textarea id=\"b\" aria-label=\"Request body\" rows=\"4\" spellcheck=\"false\" placeholder='{ \"title\": \"New task\" }'></textarea></form><div id=\"out\"></div>";
+  var NODE_CSS = "body{margin:0;padding:12px;font:13px/1.5 system-ui,sans-serif;color:#26282f;background:#fff}.st{margin:0 0 10px;color:#6b6f78}.st.ok{color:#2f7d32}.st.bad{color:#b3261e}" +
+    "form{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}select,input,textarea,button{font:12px ui-monospace,monospace;border:1px solid #d6d8dc;border-radius:6px;padding:5px 8px;background:#fff;color:inherit}" +
+    "input{flex:1;min-width:120px}textarea{flex-basis:100%;resize:vertical}textarea[hidden]{display:none}button{background:#26282f;color:#fff;border-color:#26282f;cursor:pointer}" +
+    "section{border-top:1px solid #e4e5e1;padding:8px 0}.rq{margin:0;font:12px ui-monospace,monospace;color:#555961}.code{margin:2px 0 4px;font-weight:600}.code span{font-weight:400;color:#6b6f78}" +
+    ".ok{color:#2f7d32}.warn{color:#9a6700}.bad{color:#b3261e}pre{margin:0;padding:8px;background:#f6f6f3;border-radius:6px;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}" +
+    "iframe{width:100%;height:180px;border:1px solid #e4e5e1;border-radius:6px}.none{color:#9a9ea6;font-style:italic}";
+  // .env: KEY=value lines, # comments, optional quotes (like `node --env-file=.env`)
+  function parseEnv(src){
+    var o = {};
+    src.split(/\r?\n/).forEach(function(l){
+      var m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(l), q;
+      if(!m) return;
+      var v = m[2];
+      if((q = /^(["'])([\s\S]*)\1$/.exec(v))) v = q[2]; else v = v.replace(/\s+#.*$/, "");
+      o[m[1]] = v;
+    });
+    return o;
+  }
+  var STATUS = { 200:"OK", 201:"Created", 202:"Accepted", 204:"No Content", 301:"Moved Permanently", 302:"Found", 304:"Not Modified", 400:"Bad Request", 401:"Unauthorized",
+    403:"Forbidden", 404:"Not Found", 405:"Method Not Allowed", 409:"Conflict", 415:"Unsupported Media Type", 422:"Unprocessable Entity", 429:"Too Many Requests", 500:"Internal Server Error", 501:"Not Implemented", 503:"Service Unavailable" };
+
+  function nodeRuntime(files, env, storeKey){
+    var defs = {}, cache = {}, servers = [], firstGet = null, exited = null;
+    var $ = function(id){ return document.getElementById(id); };
+    var status = function(text, cls){ var s = $("st"); s.textContent = text; s.className = "st " + (cls || ""); };
+    var later = function(fn){ setTimeout(function(){ try{ fn(); }catch(e){ report(e); } }, 0); };
+    // an error in the student's code: report it with the first server.js/module.js line in its stack
+    function report(e){
+      if(e && e.__hqExit) return;
+      var at = /(server\.js|module\.js):(\d+)/.exec(String(e && e.stack || ""));
+      var text = e instanceof Error ? e.name + ": " + e.message : "Uncaught " + (typeof e === "string" ? e : JSON.stringify(e));
+      window.__hqSend("error", [text], at ? +at[2] : 0, at ? at[1] : "");
+    }
+    var proc = { env: env, argv: ["node", "/app/server.js"], platform: "linux", version: "v22.0.0", versions: { node: "22.0.0" }, pid: 1,
+      cwd: function(){ return "/app"; }, on: function(){ return proc; }, once: function(){ return proc; },
+      nextTick: function(fn){ var a = [].slice.call(arguments, 1); Promise.resolve().then(function(){ fn.apply(null, a); }); },
+      exit: function(code){ exited = code == null ? 0 : code; servers.length = 0; var e = new Error("process.exit"); e.__hqExit = true; throw e; } };
+
+    function require(name){
+      var n = String(name).replace(/^node:/, "");
+      if(n === "http") return http;
+      if(n === "express") return express;
+      if(n === "dotenv") return { config: function(){ return { parsed: Object.assign({}, env) }; } };
+      if(n === "dotenv/config") return {};
+      if(/^\.{0,2}\//.test(n)){
+        var f = n.replace(/^(\.\.?\/)+|^\//g, "");
+        if(!/\.js$/.test(f)) f += ".js";
+        if(defs[f]) return load(f);
+      }
+      var err = new Error("Cannot find module '" + name + "'. In the Workshop you can require http, express, dotenv, ./module.js and ./server.js.");
+      err.code = "MODULE_NOT_FOUND"; throw err;
+    }
+    function load(f){
+      if(cache[f]) return cache[f].exports;
+      var mod = cache[f] = { exports: {}, id: f, filename: "/app/" + f, loaded: false };
+      defs[f].call(mod.exports, mod.exports, require, mod, "/app/" + f, "/app", proc, window);
+      mod.loaded = true;
+      return mod.exports;
+    }
+
+    /* ----- http ----- */
+    var http = { STATUS_CODES: STATUS, createServer: function(opts, handler){
+      if(typeof opts === "function") handler = opts;
+      var s = { handlers: handler ? [handler] : [], port: null, listening: false,
+        on: function(ev, fn){ if(ev === "request") s.handlers.push(fn); return s; },
+        listen: function(){
+          var a = [].slice.call(arguments), cb = typeof a[a.length - 1] === "function" ? a.pop() : null;
+          s.port = a[0] == null || a[0] === "" ? 3000 : a[0];   // real Node picks a random free port; 3000 is easier to read
+          s.listening = true; servers.push(s);
+          if(cb) later(cb);
+          return s;
+        },
+        close: function(cb){ s.listening = false; servers = servers.filter(function(x){ return x !== s; }); if(cb) later(cb); return s; },
+        address: function(){ return { port: +s.port, address: "::", family: "IPv6" }; } };
+      return s;
+    } };
+
+    function headersSent(){ var e = new Error("Cannot set headers after they are sent to the client"); e.code = "ERR_HTTP_HEADERS_SENT"; return e; }
+    // one request through a server; done gets {status, statusText, headers, body} or {error}
+    function dispatch(s, method, url, body, done){
+      var headers = { host: "localhost:" + s.port, "user-agent": "Creature HQ Workshop", accept: "*/*" };
+      if(body){ var json = true; try{ JSON.parse(body); }catch(e){ json = false; } headers["content-type"] = json ? "application/json" : "text/plain"; headers["content-length"] = String(body.length); }
+      var ev = {}, streamed = false;
+      var req = { method: method, url: url, headers: headers, httpVersion: "1.1", socket: { remoteAddress: "127.0.0.1" }, rawBody: body || "",
+        on: function(name, fn){
+          (ev[name] = ev[name] || []).push(fn);
+          // the body arrives after the handler has had a chance to listen, like a real stream
+          if(!streamed && (name === "data" || name === "end")){ streamed = true;
+            setTimeout(function(){ try{ if(req.rawBody) (ev.data || []).forEach(function(f){ f(req.rawBody); }); (ev.end || []).forEach(function(f){ f(); }); }catch(e){ report(e); fail("The server threw an error while reading the body (see the console)."); } }, 0); }
+          return req;
+        } };
+      req.once = req.on;
+      var finished = false, timer = setTimeout(function(){ fail("No response after 5 seconds. Every request needs an answer: call res.end(), res.send() or res.json()."); }, 5000);
+      function fail(msg){ if(finished) return; finished = true; clearTimeout(timer); done({ error: msg }); }
+      var h = {}, chunks = [];
+      function chunk(c){
+        if(typeof c !== "string" && !(c instanceof Uint8Array)){
+          throw new TypeError("The \"chunk\" argument must be of type string or an instance of Buffer or Uint8Array. Received " + (c === null ? "null" : typeof c) + ". To send an object, use JSON.stringify(...) or res.json(...).");
+        }
+        chunks.push(typeof c === "string" ? c : new TextDecoder().decode(c));
+      }
+      var res = { statusCode: 200, statusMessage: "", headersSent: false, writableEnded: false, finished: false, locals: {},
+        setHeader: function(k, v){ if(res.headersSent) throw headersSent(); h[String(k).toLowerCase()] = [k, v]; return res; },
+        getHeader: function(k){ var x = h[String(k).toLowerCase()]; return x && x[1]; },
+        getHeaders: function(){ var o = {}; for(var k in h) o[k] = h[k][1]; return o; },
+        hasHeader: function(k){ return String(k).toLowerCase() in h; },
+        removeHeader: function(k){ delete h[String(k).toLowerCase()]; },
+        writeHead: function(code, msg, hs){
+          if(res.headersSent) throw headersSent();
+          if(typeof msg === "object"){ hs = msg; msg = ""; }
+          res.statusCode = code; if(msg) res.statusMessage = msg;
+          for(var k in hs || {}) res.setHeader(k, hs[k]);
+          res.headersSent = true; return res;
+        },
+        write: function(c){ if(res.writableEnded){ var e = new Error("write after end"); e.code = "ERR_STREAM_WRITE_AFTER_END"; throw e; } if(c != null) chunk(c); res.headersSent = true; return true; },
+        end: function(c){
+          if(res.writableEnded) return res;
+          if(typeof c !== "function" && c != null) chunk(c);
+          res.headersSent = res.writableEnded = res.finished = true;
+          if(!finished){ finished = true; clearTimeout(timer);
+            var out = {}; for(var k in h) out[h[k][0]] = h[k][1];
+            done({ status: res.statusCode, statusText: res.statusMessage || STATUS[res.statusCode] || "", headers: out, type: res.getHeader("content-type") || "", body: chunks.join("") });
+          }
+          return res;
+        } };
+      s.handlers.forEach(function(fn){
+        try{ fn(req, res); }catch(e){ report(e); fail("The server crashed while handling this request. The console shows where."); }
+      });
+      if(!s.handlers.length) fail("This server has no request handler. Pass one to http.createServer((req, res) => { ... }).");
+    }
+
+    /* ----- express (the parts the Express quests use, with Express 5 behaviour) ----- */
+    function pathRe(p, end){
+      if(p instanceof RegExp) return { re: p, keys: [] };
+      var keys = [], src = String(p).split("/").filter(Boolean).map(function(seg){
+        var k = /^:(\w+)(\?)?$/.exec(seg);
+        if(k){ keys.push(k[1]); return k[2] ? "(?:/([^/]+?))?" : "/([^/]+?)"; }
+        if(/^\*/.test(seg)){ keys.push(seg.slice(1) || "0"); return "(?:/(.*))?"; }
+        return "/" + seg.replace(/[.+?^${}()|[\]\\*]/g, "\\$&");
+      }).join("");
+      return { re: new RegExp("^" + src + (end ? "/?$" : "(?=/|$)"), "i"), keys: keys };
+    }
+    function router(){
+      var stack = [];
+      var r = function(req, res, next){ r.handle(req, res, next); };
+      function add(method, path, fns, end){
+        [].concat.apply([], fns).forEach(function(fn){
+          if(typeof fn !== "function") throw new TypeError((method ? "Route." + method.toLowerCase() : "app.use") + "() requires a callback function but got a " + (fn === null ? "null" : typeof fn));
+          var c = pathRe(path, end);
+          stack.push({ method: method, re: c.re, keys: c.keys, fn: fn });
+        });
+      }
+      r.use = function(){ var a = [].slice.call(arguments), p = typeof a[0] === "string" ? a.shift() : "/"; add(null, p, a, false); return r; };
+      ["get", "post", "put", "patch", "delete", "all"].forEach(function(m){
+        r[m] = function(p){
+          if(m === "get" && r.isApp && !firstGet && typeof p === "string" && !/[:*]/.test(p)) firstGet = p;   // the preview's first request
+          add(m === "all" ? "*" : m.toUpperCase(), p, [].slice.call(arguments, 1), true); return r;
+        };
+      });
+      r.route = function(p){ var o = {}; ["get", "post", "put", "patch", "delete", "all"].forEach(function(m){ o[m] = function(){ r[m].apply(r, [p].concat([].slice.call(arguments))); return o; }; }); return o; };
+      r.handle = function(req, res, out){
+        var i = 0, base = req.baseUrl || "";
+        function next(err){
+          if(err === "route" || err === "router") err = null;
+          req.baseUrl = base;
+          var L = stack[i++];
+          if(!L) return out(err);
+          var rel = req.fullPath.slice(base.length) || "/", mt = L.re.exec(rel);
+          if(!mt || L.method && L.method !== "*" && L.method !== req.method) return next(err);
+          if(err ? L.fn.length !== 4 : L.fn.length === 4) return next(err);
+          req.params = {};
+          L.keys.forEach(function(k, j){ var v = mt[j + 1]; if(v !== undefined) try{ req.params[k] = decodeURIComponent(v); }catch(e){ req.params[k] = v; } });
+          if(!L.method){ req.baseUrl = base + mt[0].replace(/\/$/, ""); req.path = rel.slice(mt[0].length) || "/"; } else req.path = rel;
+          try{
+            var ret = err ? L.fn(err, req, res, next) : L.fn(req, res, next);
+            if(ret && typeof ret.then === "function") ret.then(null, function(e){ next(e || new Error("Rejected promise")); });   // Express 5 catches async errors
+          }catch(e){ next(e); }
+        }
+        next();
+      };
+      return r;
+    }
+    function express(){
+      var app = router(), settings = {};
+      app.isApp = true; app.locals = {};
+      var get = app.get;
+      app.get = function(p){ return arguments.length === 1 && typeof p === "string" ? settings[p] : get.apply(app, arguments); };
+      app.set = function(k, v){ settings[k] = v; return app; };
+      app.listen = function(){
+        var s = http.createServer(function(req, res){ app.handle(expressReq(req, app), expressRes(res), function(err){ finish(err, req, res); }); });
+        return s.listen.apply(s, arguments);
+      };
+      return app;
+    }
+    express.Router = function(){ return router(); };
+    express.json = function(){ return function jsonParser(req, res, next){
+      if(req.body !== undefined || !/json/i.test(req.get("content-type") || "") || !req.rawBody) return next();
+      try{ req.body = JSON.parse(req.rawBody); next(); }
+      catch(e){ var err = new SyntaxError(e.message); err.status = err.statusCode = 400; err.type = "entity.parse.failed"; err.body = req.rawBody; next(err); }
+    }; };
+    express.urlencoded = function(){ return function urlencodedParser(req, res, next){
+      if(req.body === undefined && /x-www-form-urlencoded/i.test(req.get("content-type") || "")) req.body = Object.fromEntries(new URLSearchParams(req.rawBody));
+      next();
+    }; };
+    express.static = function(){ return function serveStatic(req, res, next){ next(); }; };   // there are no files to serve in the Workshop
+    function expressReq(req, app){
+      var u = new URL(req.url, "http://localhost"), q = {};
+      u.searchParams.forEach(function(v, k){ q[k] = k in q ? [].concat(q[k], v) : v; });
+      req.app = app; req.originalUrl = req.url; req.fullPath = req.path = u.pathname; req.query = q; req.params = {}; req.baseUrl = "";
+      req.get = req.header = function(n){ return req.headers[String(n).toLowerCase()]; };
+      req.ip = "127.0.0.1"; req.hostname = "localhost"; req.protocol = "http";
+      return req;
+    }
+    function expressRes(res){
+      var guard = function(){ if(res.headersSent) throw headersSent(); };
+      var types = { json: "application/json; charset=utf-8", html: "text/html; charset=utf-8", text: "text/plain; charset=utf-8" };
+      res.status = function(c){ res.statusCode = c; return res; };
+      res.set = res.header = function(k, v){ if(typeof k === "object"){ for(var x in k) res.setHeader(x, k[x]); } else res.setHeader(k, v); return res; };
+      res.get = function(k){ return res.getHeader(k); };
+      res.type = function(t){ return res.set("Content-Type", types[t] || t); };
+      res.json = function(o){ guard(); if(!res.getHeader("content-type")) res.setHeader("Content-Type", types.json); var b = JSON.stringify(o); return res.end(b === undefined ? "" : b); };
+      res.send = function(b){
+        guard();
+        if(b !== null && typeof b === "object" && !(b instanceof Uint8Array)) return res.json(b);
+        if(!res.getHeader("content-type")) res.setHeader("Content-Type", typeof b === "string" ? types.html : "application/octet-stream");
+        return res.end(b == null ? "" : typeof b === "string" || b instanceof Uint8Array ? b : String(b));
+      };
+      res.sendStatus = function(c){ guard(); res.statusCode = c; res.setHeader("Content-Type", types.text); return res.end(STATUS[c] || String(c)); };
+      res.location = function(u){ return res.set("Location", u); };
+      res.redirect = function(a, b){ guard(); var code = typeof a === "number" ? a : 302, u = typeof a === "number" ? b : a; res.statusCode = code; res.setHeader("Location", u); res.setHeader("Content-Type", types.text); return res.end("Redirecting to " + u); };
+      return res;
+    }
+    // what Express does when nothing answered: 404, or the error's status with its message (and a log line, like Express's own handler)
+    function finish(err, req, res){
+      if(err){
+        report(err);
+        if(res.headersSent) return;
+        var st = err.status || err.statusCode; if(!(st >= 400 && st < 600)) st = 500;
+        res.statusCode = st; res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        return res.end(st < 500 && err.message ? err.message : STATUS[st] || "Error");
+      }
+      if(res.headersSent) return;
+      res.statusCode = 404; res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.end("Cannot " + req.method + " " + req.fullPath);
+    }
+
+    /* ----- the request panel ----- */
+    var store = { get: function(){ try{ return JSON.parse(localStorage.getItem(storeKey)); }catch(e){ return null; } },
+      set: function(v){ try{ localStorage.setItem(storeKey, JSON.stringify(v)); }catch(e){} } };
+    function show(method, url, r, ms){
+      var h = "<section><p class=\"rq\">" + escHtml(method + " " + url) + "</p>";
+      if(r.error) h += "<p class=\"code bad\">" + escHtml(r.error) + "</p>";
+      else{
+        var cls = r.status >= 500 ? "bad" : r.status >= 400 ? "warn" : "ok", body = r.body, pretty = null;
+        h += "<p class=\"code " + cls + "\">" + r.status + " " + escHtml(r.statusText) + " <span>· " + escHtml(r.type || "no Content-Type") + " · " + Math.max(1, Math.round(ms)) + " ms</span></p>";
+        if(/json/i.test(r.type)) try{ pretty = JSON.stringify(JSON.parse(body), null, 2); }catch(e){}
+        if(!body) h += "<p class=\"none\">Empty body</p>";
+        else if(/html/i.test(r.type) && /<[a-z!]/i.test(body)) h += "<iframe sandbox title=\"Response\" srcdoc=\"" + escHtml(body) + "\"></iframe>";
+        else h += "<pre>" + escHtml(pretty || body) + "</pre>";
+      }
+      var out = $("out");
+      out.insertAdjacentHTML("afterbegin", h + "</section>");
+      while(out.children.length > 20) out.removeChild(out.lastChild);
+    }
+    function panel(){
+      var s = servers[0], form = $("rq"), m = $("m"), u = $("u"), b = $("b");
+      status("Listening on port " + s.port + ". Send it a request:", "ok");
+      form.hidden = false;
+      var last = store.get() || { method: "GET", url: firstGet || "/", body: "" };
+      m.value = last.method; u.value = last.url; b.value = last.body || "";
+      var bodyless = function(){ b.hidden = m.value === "GET" || m.value === "DELETE"; };
+      bodyless(); m.onchange = bodyless;
+      var send = function(){
+        var url = u.value.trim() || "/"; if(url.charAt(0) !== "/") url = "/" + url;
+        var body = b.hidden ? "" : b.value, t0 = performance.now();
+        store.set({ method: m.value, url: url, body: b.value });
+        if(!servers.length) return show(m.value, url, { error: "The server isn't running anymore." }, 0);
+        dispatch(servers[0], m.value, url, body, function(r){ show(m.value, url, r, performance.now() - t0); });
+      };
+      form.onsubmit = function(e){ e.preventDefault(); send(); };
+      send();   // replay the last request so editing the code shows the new answer straight away
+    }
+
+    return {
+      define: function(name, fn){ defs[name] = fn; },
+      main: function(){
+        if(!defs["server.js"] || !defs["module.js"]) return status("Didn't start. Fix the error shown in the console, then run again.", "bad");
+        try{ load("server.js"); }
+        catch(e){ if(!e.__hqExit){ report(e); return status("Crashed while starting. The console shows where.", "bad"); } }
+        setTimeout(function(){
+          if(exited !== null) return status("Process exited with code " + exited + ".", exited ? "bad" : "");
+          if(servers.length) return panel();
+          status("Script finished. Its output is in the console. Call listen() on a server to send it requests here.");
+        }, 30);
+      }
+    };
+  }
 
   function esc(s, tag){ return s.replace(new RegExp("</" + tag, "gi"), "<\\/" + tag); }
 
   // Reports console output and errors to the Workshop. Kept on one line so it doesn't shift line numbers.
-  function shim(origin, runId){
-    var code = "(function(){var P=parent!==window?parent:null,O=" + JSON.stringify(origin) + ",R=" + JSON.stringify(runId) + ";" +
+  // files maps each file name to its slot ({"script.js":"js"}); errors in those files report slot and line.
+  function shim(origin, runId, files){
+    var code = "(function(){var P=parent!==window?parent:null,O=" + JSON.stringify(origin) + ",R=" + JSON.stringify(runId) + ",F=" + JSON.stringify(files) + ";" +
       "function ser(v,d){d=d||0;try{if(v===null)return'null';if(v===undefined)return'undefined';var t=typeof v;" +
       "if(t==='string')return d?JSON.stringify(v):v;if(t==='number'||t==='boolean'||t==='bigint')return String(v);if(t==='symbol')return v.toString();" +
       "if(t==='function')return'ƒ '+(v.name||'anonymous')+'()';if(v instanceof Error)return v.name+': '+v.message;" +
@@ -39,7 +568,14 @@
       "if(d>2)return Array.isArray(v)?'[…]':'{…}';" +
       "if(Array.isArray(v))return'['+v.slice(0,50).map(function(x){return ser(x,d+1)}).join(', ')+(v.length>50?', …':'')+']';" +
       "var k=Object.keys(v).slice(0,30);return(v.constructor&&v.constructor.name&&v.constructor.name!=='Object'?v.constructor.name+' ':'')+'{'+k.map(function(x){return x+': '+ser(v[x],d+1)}).join(', ')+(Object.keys(v).length>30?', …':'')+'}'}catch(e){return'[unprintable]'}}" +
-      "function send(level,args,line,file){try{var m={type:'hq-console',runId:R,level:level,text:Array.prototype.map.call(args,function(a){return ser(a)}).join(' ').slice(0,4000),line:/(^|\\/)script\\.js$/.test(file||'')&&line>1?line-1:0};(P||window.opener)&&(P||window.opener).postMessage(m,O)}catch(e){}}" +
+      // console.log("%s items", n): fill the placeholders like a real console (React's warnings use them)
+      "function fmt(args){args=Array.prototype.slice.call(args);var f=args[0];if(typeof f==='string'&&args.length>1&&/%[sdifoOc]/.test(f)){args.shift();" +
+      "f=f.replace(/%([sdifoOc%])/g,function(all,c){if(c==='%')return'%';if(!args.length)return all;var v=args.shift();return c==='c'?'':c==='d'||c==='i'?String(parseInt(v,10)):c==='f'?String(parseFloat(v)):ser(v)});args.unshift(f)}" +
+      "return args.map(function(a){return ser(a)}).join(' ')}" +
+      // React Router v6 warns about v7 changes on every run; that's noise for someone learning routing
+      "function noise(t){return/^\u26a0\ufe0f React Router Future Flag Warning/.test(t)}" +
+      "function send(level,args,line,file){try{var t=fmt(args);if(noise(t))return;var s=F.hasOwnProperty((file||'').split('/').pop())?F[(file||'').split('/').pop()]:'';" +
+      "var m={type:'hq-console',runId:R,level:level,text:t.slice(0,4000),line:s&&line>1?line-1:0,file:s};(P||window.opener)&&(P||window.opener).postMessage(m,O)}catch(e){}}window.__hqSend=send;" +
       "['log','info','warn','error','debug','table'].forEach(function(l){var o=console[l];console[l]=function(){send(l==='table'||l==='debug'?'log':l,arguments);try{o&&o.apply(console,arguments)}catch(e){}}});" +
       "window.addEventListener('error',function(e){if(e.error||e.message)send('error',[e.error?(e.error.name+': '+e.error.message):e.message],e.lineno,e.filename)});" +
       "window.addEventListener('unhandledrejection',function(e){send('error',['Uncaught (in promise) '+ser(e.reason)])});" +
@@ -48,13 +584,18 @@
     return "<script>" + code + "<\/script>";
   }
 
-  function build(html, css, js, origin, runId){
+  function build(html, css, js, origin, runId, kind){
+    var K = KINDS[kind], file = K.js, libs = "";
+    if(K.libs){
+      libs = K.libs.concat(/react-router/.test(js) ? K.router : []).map(function(u){ return "<script src=\"" + u + "\"><\/script>"; }).join("");
+      js = compile(js);
+    }
     var style = "<style>\n" + esc(css, "style") + "\n</style>";
-    // label the block as script.js so errors report that file; its first line is this marker, so file line = reported line - 1
-    var body = "/*hq-js*/\n" + esc(js, "script") + "\n//# sourceURL=script.js\n";
+    // label the block with the file name (script.js, App.jsx) so errors report that file; its first line is this marker, so file line = reported line - 1
+    var body = "/*hq-js*/\n" + esc(js, "script") + "\n//# sourceURL=" + file + "\n";
     var jsTag = "<script>" + body + "<\/script>";
     var linkRe = /<link\b[^>]*href\s*=\s*["']?(?:\.\/)?style\.css["']?[^>]*>/i;
-    var scriptRe = /<script\b([^>]*)src\s*=\s*["']?(?:\.\/)?script\.js["']?([^>]*)>\s*<\/script>/i;
+    var scriptRe = new RegExp("<script\\b([^>]*)src\\s*=\\s*[\"']?(?:\\./)?" + file.replace(".", "\\.") + "[\"']?([^>]*)>\\s*<\\/script>", "i");
     var usedCss = linkRe.test(html), usedJs = false, deferJs = false;
     if(usedCss) html = html.replace(linkRe, function(){ return style; });
     html = html.replace(scriptRe, function(all, a, b){
@@ -67,7 +608,7 @@
     var full = /<html[\s>]|<!doctype/i.test(html);
     if(!full) html = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n</head>\n<body>\n" + html + "\n</body>\n</html>";
     // console shim goes first, on the same line as <head>, so line numbers in index.html stay true
-    var s = shim(origin, runId);
+    var s = shim(origin, runId, (function(o){ o[file] = "js"; return o; })({})) + libs;
     if(/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, function(h){ return h + s; });
     else html = s + html;
     if(!usedCss) html = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, style + "\n</head>") : style + html;

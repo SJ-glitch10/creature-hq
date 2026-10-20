@@ -8,9 +8,13 @@ import { indentUnit, HighlightStyle, syntaxHighlighting } from "@codemirror/lang
 import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 import { javascript } from "@codemirror/lang-javascript";
+import { sql, PostgreSQL } from "@codemirror/lang-sql";
 import { tags as t } from "@lezer/highlight";
 
-const LANGS = { html: () => html({ autoCloseTags: true }), css: () => css(), js: () => javascript() };
+// languages a file slot can use; a project kind picks one per slot (Node keeps module.js in the css slot)
+const MODES = { html: () => html({ autoCloseTags: true }), css: () => css(), js: () => javascript(), jsx: () => javascript({ jsx: true }),
+  sql: () => sql({ dialect: PostgreSQL }), text: () => [] };
+const SLOTS = ["html", "css", "js"];
 
 // colours come from CSS variables so the editor follows the app's light/dark theme
 const highlight = HighlightStyle.define([
@@ -48,7 +52,7 @@ const theme = EditorView.theme({
   ".cm-searchMatch": { backgroundColor: "var(--amber-soft)", outline: "1px solid var(--amber)" }
 });
 
-export function createEditor({ parent, files, active, onChange, onRun, onSave }) {
+export function createEditor({ parent, files, active, langs = {}, labels = {}, onChange, onRun, onSave }) {
   const lang = new Compartment();
   const extensions = name => [
     basicSetup,
@@ -59,15 +63,15 @@ export function createEditor({ parent, files, active, onChange, onRun, onSave })
     ]),
     indentUnit.of("  "),
     EditorState.tabSize.of(2),
-    lang.of(LANGS[name]()),
+    lang.of(MODES[langs[name] || name]()),
     syntaxHighlighting(highlight),
     theme,
     EditorView.lineWrapping,
-    EditorView.contentAttributes.of({ "aria-label": name.toUpperCase() + " code", spellcheck: "false", autocapitalize: "off" }),
+    EditorView.contentAttributes.of({ "aria-label": (labels[name] || name.toUpperCase()) + " code", spellcheck: "false", autocapitalize: "off" }),
     EditorView.updateListener.of(u => { if (u.docChanged && onChange) onChange(name, u.state.doc.toString()); })
   ];
   const states = {};
-  for (const name of Object.keys(LANGS)) states[name] = EditorState.create({ doc: files[name] || "", extensions: extensions(name) });
+  for (const name of SLOTS) states[name] = EditorState.create({ doc: files[name] || "", extensions: extensions(name) });
   let current = active in states ? active : "html";
   const view = new EditorView({ state: states[current], parent });
 
@@ -81,7 +85,7 @@ export function createEditor({ parent, files, active, onChange, onRun, onSave })
     },
     // replace every file (another project was opened)
     load(newFiles, name = "html") {
-      for (const n of Object.keys(LANGS)) states[n] = EditorState.create({ doc: newFiles[n] || "", extensions: extensions(n) });
+      for (const n of SLOTS) states[n] = EditorState.create({ doc: newFiles[n] || "", extensions: extensions(n) });
       current = name in states ? name : "html";
       view.setState(states[current]);
     },
